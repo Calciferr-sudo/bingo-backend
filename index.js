@@ -7,20 +7,19 @@ const app = express();
 app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*' }  // Allow all origins or restrict to your frontend domain
+  cors: { origin: '*' }
 });
 
 let players = {};
 let scoreboard = {};
 let currentTimer = null;
 let countdown = 10;
-let gameActive = true;  // Prevent multiple winners per round
+let gameActive = true;
 
 io.on('connection', (socket) => {
   console.log(`Player connected: ${socket.id}`);
 
   socket.on('joinGame', (playerName) => {
-    // Optionally check for duplicate names here
     players[socket.id] = playerName;
     if (!scoreboard[playerName]) scoreboard[playerName] = 0;
     io.emit('updatePlayers', players);
@@ -31,13 +30,13 @@ io.on('connection', (socket) => {
   });
 
   socket.on('markNumber', (num) => {
-    if (!gameActive) return; // Ignore marks if game ended
+    if (!gameActive) return;
     io.emit('markNumber', num);
-    startCountdown(); // reset or continue countdown
+    startCountdown();
   });
 
   socket.on('declareWin', () => {
-    if (!gameActive) return; // Only first winner counts
+    if (!gameActive) return;
     const winnerName = players[socket.id];
     if (winnerName) {
       scoreboard[winnerName] = (scoreboard[winnerName] || 0) + 1;
@@ -49,7 +48,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('playAgain', () => {
-    // Reset for next game
     gameActive = true;
     io.emit('resetGame');
     startCountdown();
@@ -64,7 +62,7 @@ io.on('connection', (socket) => {
 });
 
 function startCountdown() {
-  stopCountdown();
+  if (currentTimer) return; // Avoid multiple timers
   countdown = 10;
   io.emit('countdown', countdown);
   currentTimer = setInterval(() => {
@@ -73,7 +71,13 @@ function startCountdown() {
     if (countdown <= 0) {
       stopCountdown();
       io.emit('turnTimeout');
-      // You may want to do something on timeout, e.g. force next turn or reset game
+      gameActive = false;
+      // Auto-reset after 5 seconds
+      setTimeout(() => {
+        gameActive = true;
+        io.emit('resetGame');
+        startCountdown();
+      }, 5000);
     }
   }, 1000);
 }

@@ -35,17 +35,18 @@ io.on('connection', (socket) => {
     startCountdown();
   });
 
-  socket.on('declareWin', () => {
-    if (!gameActive) return;
-    const winnerName = players[socket.id];
-    if (winnerName) {
-      scoreboard[winnerName] = (scoreboard[winnerName] || 0) + 1;
-      io.emit('gameOver', winnerName);
-      io.emit('updateScoreboard', scoreboard);
-      stopCountdown();
-      gameActive = false;
-    }
-  });
+ socket.on('declareWin', () => {
+  if (!gameActive) return;
+  const winnerName = players[socket.id];
+  if (winnerName) {
+    scoreboard[winnerName] = (scoreboard[winnerName] || 0) + 1;
+    io.emit('gameOver', winnerName); // this emits the correct name
+    io.emit('updateScoreboard', scoreboard);
+    stopCountdown();
+    gameActive = false;
+  }
+});
+
 
   socket.on('playAgain', () => {
     gameActive = true;

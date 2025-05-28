@@ -7,7 +7,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIO(server, {
   cors: {
-    origin: "https://github.com/Calciferr-sudo/bingo-multiplayer",
+    origin: 'https://github.com/Calciferr-sudo',
     methods: ['GET', 'POST']
   }
 });

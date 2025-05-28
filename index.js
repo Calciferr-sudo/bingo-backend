@@ -7,7 +7,7 @@ const app = express();
 app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*' }
+  cors: { origin: 'https://github.com/Calciferr-sudo' }
 });
 
 let players = {};
@@ -25,7 +25,10 @@ io.on('connection', (socket) => {
     io.emit('updatePlayers', players);
     io.emit('updateScoreboard', scoreboard);
     if (!gameActive) {
-     socket.emit('gameOver', 'Game already ended, please wait for reset.');
+      socket.emit('gameOver', {
+        winner: null,
+        message: "Game already ended, please wait for reset."
+      });
     }
   });
 
@@ -35,18 +38,20 @@ io.on('connection', (socket) => {
     startCountdown();
   });
 
- socket.on('declareWin', () => {
-  if (!gameActive) return;
-  const winnerName = players[socket.id];
-  if (winnerName) {
-    scoreboard[winnerName] = (scoreboard[winnerName] || 0) + 1;
-   io.emit('gameOver', { winner: winnerName, message: `${winnerName} WON!` });
-    io.emit('updateScoreboard', scoreboard);
-    stopCountdown();
-    gameActive = false;
-  }
-});
-
+  socket.on('declareWin', () => {
+    if (!gameActive) return;
+    const winnerName = players[socket.id];
+    if (winnerName) {
+      scoreboard[winnerName] = (scoreboard[winnerName] || 0) + 1;
+      io.emit('gameOver', {
+        winner: winnerName,
+        message: `🎉 ${winnerName} WON!`
+      });
+      io.emit('updateScoreboard', scoreboard);
+      stopCountdown();
+      gameActive = false;
+    }
+  });
 
   socket.on('playAgain', () => {
     gameActive = true;
@@ -55,7 +60,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    const leftPlayer = players[socket.id];
     delete players[socket.id];
     console.log(`Player disconnected: ${socket.id}`);
     io.emit('updatePlayers', players);
@@ -63,7 +67,7 @@ io.on('connection', (socket) => {
 });
 
 function startCountdown() {
-  if (currentTimer) return; // Avoid multiple timers
+  stopCountdown();
   countdown = 10;
   io.emit('countdown', countdown);
   currentTimer = setInterval(() => {
@@ -72,13 +76,6 @@ function startCountdown() {
     if (countdown <= 0) {
       stopCountdown();
       io.emit('turnTimeout');
-      gameActive = false;
-      // Auto-reset after 5 seconds
-      setTimeout(() => {
-        gameActive = true;
-        io.emit('resetGame');
-        startCountdown();
-      }, 5000);
     }
   }, 1000);
 }

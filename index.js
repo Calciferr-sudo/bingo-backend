@@ -31,11 +31,6 @@ io.on('connection', (socket) => {
     console.log('A user disconnected');
   });
 });
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
 socket.on("chatMessage", (msg) => {
   io.emit("chatMessage", msg);
 });

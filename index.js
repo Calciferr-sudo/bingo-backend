@@ -25,7 +25,7 @@ io.on('connection', (socket) => {
     io.emit('updatePlayers', players);
     io.emit('updateScoreboard', scoreboard);
     if (!gameActive) {
-     socket.emit('gameOver', { winner: null, message: "Game already ended, please wait for reset." });
+     socket.emit('gameOver', 'Game already ended, please wait for reset.');
     }
   });
 

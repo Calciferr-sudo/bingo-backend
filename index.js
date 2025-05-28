@@ -1,22 +1,23 @@
 const express = require('express');
 const http = require('http');
-const socketIo = require('socket.io');
 const cors = require('cors');
+const socketIO = require('socket.io');
 
 const app = express();
-app.use(cors());
+app.use(cors()); // ✅ Important!
 
 const server = http.createServer(app);
-const io = socketIo(server, {
+
+// Socket.IO server configured with CORS:
+const io = socketIO(server, {
   cors: {
-    origin: '*',
-    methods: ['GET', 'POST'],
+    origin: 'https://calciferr-sudo.github.io', // ✅ Your exact GitHub Pages URL
+    methods: ['GET', 'POST']
   }
 });
 
-// Your socket.io logic here...
 io.on('connection', (socket) => {
-  console.log('New user connected');
+  console.log('A user connected');
 
   socket.on('markNumber', (num) => {
     io.emit('markNumber', num);
@@ -27,12 +28,11 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    console.log('User disconnected');
+    console.log('A user disconnected');
   });
 });
 
-// ✅ Only one listen call:
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`Server listening on port ${PORT}`);
 });

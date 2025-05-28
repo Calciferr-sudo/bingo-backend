@@ -1,39 +1,25 @@
 const express = require('express');
 const http = require('http');
+const socketIo = require('socket.io');
 const cors = require('cors');
-const socketIO = require('socket.io');
 
 const app = express();
+app.use(cors());
+
 const server = http.createServer(app);
-const io = socketIO(server, {
+const io = socketIo(server, {
   cors: {
-    origin: "*",
-    methods: ['GET', 'POST']
+    origin: '*',
+    methods: ['GET', 'POST'],
   }
 });
 
-const PORT = process.env.PORT || 3000;  // ✅ Important!
+// Your socket.io logic here...
+io.on('connection', (socket) => {
+  console.log('New user connected');
 
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
-
-let players = [];
-let gameStarted = false;
-
-io.on('connection', socket => {
-  console.log(`Player connected: ${socket.id}`);
-
-  if (players.length >= 2 || gameStarted) {
-    socket.emit('roomFull');
-    socket.disconnect();
-    return;
-  }
-
-  players.push(socket);
-
-  socket.on('markNumber', num => {
-    io.emit('markNumber', num); // Broadcast to all
+  socket.on('markNumber', (num) => {
+    io.emit('markNumber', num);
   });
 
   socket.on('declareWin', () => {
@@ -41,11 +27,12 @@ io.on('connection', socket => {
   });
 
   socket.on('disconnect', () => {
-    players = players.filter(p => p !== socket);
-    console.log(`Player disconnected: ${socket.id}`);
+    console.log('User disconnected');
   });
 });
 
-server.listen(3000, () => {
-  console.log("Server running on port 3000");
+// ✅ Only one listen call:
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
 });

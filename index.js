@@ -13,7 +13,7 @@ const FRONTEND_URL = 'https://bingo-multiplayer.pages.dev'; // <--- !!! CHANGE T
 
 const io = socketIO(server, {
     cors: {
-        origin:'https://github.com/Calciferr-sudo/bingo-multiplayer',
+        origin:FRONTEND_URL,
         methods: ['GET', 'POST']
     }
 });

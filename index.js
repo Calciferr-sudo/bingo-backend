@@ -9,7 +9,7 @@ const server = http.createServer(app);
 // IMPORTANT: Set your frontend's actual URL here.
 // If running locally with Live Server, it's often http://127.0.0.1:5500 or http://localhost:5500
 // If hosted on Render, it would be https://your-frontend-app-name.onrender.com
-const FRONTEND_URL = 'https://bingo-multiplayer-client-app.onrender.com'; // <--- !!! CHANGE THIS !!!
+const FRONTEND_URL = 'https://bingo-multiplayer.pages.dev'; // <--- !!! CHANGE THIS !!!
 
 const io = socketIO(server, {
     cors: {

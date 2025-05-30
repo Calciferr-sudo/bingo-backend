@@ -59,7 +59,8 @@ function emitGameState(gameId) {
         gameStarted: gameRoom.gameStarted,
         currentTurnPlayerId: gameRoom.currentTurnPlayerId,
         markedNumbers: gameRoom.markedNumbers,
-        winnerId: gameRoom.winnerId || null // Add winnerId to state
+        winnerId: gameRoom.winnerId || null, // Add winnerId to state
+        pendingNewMatchRequest: gameRoom.pendingNewMatchRequest || null // NEW: Include pending request state
     });
 }
 
@@ -79,7 +80,7 @@ function advanceTurn(gameRoom) {
 }
 
 /**
- * Resets a specific game room to its initial state.
+ * Resets a specific game room to its initial state for a new round.
  * @param {string} gameId - The ID of the game room to reset.
  */
 function resetGameRound(gameId) {
@@ -95,7 +96,9 @@ function resetGameRound(gameId) {
     gameRoom.markedNumbers = [];
     gameRoom.turnIndex = 0;
     gameRoom.winnerId = null; // Clear winner
-    // Assign player numbers for the new round
+    gameRoom.pendingNewMatchRequest = null; // NEW: Clear any pending requests
+
+    // Re-assign player numbers in case players left/joined
     gameRoom.players.forEach((p, idx) => {
         p.playerNumber = idx + 1;
     });
@@ -126,7 +129,8 @@ io.on('connection', (socket) => {
             currentTurnPlayerId: null,
             markedNumbers: [],
             turnIndex: 0,
-            winnerId: null // New field to track winner
+            winnerId: null,
+            pendingNewMatchRequest: null // NEW: Initialize pending request state
         };
         gameRooms.set(gameId, newGameRoom);
 
@@ -206,6 +210,8 @@ io.on('connection', (socket) => {
         }
 
         gameRoom.gameStarted = true;
+        gameRoom.winnerId = null; // Clear winner for new round
+        gameRoom.pendingNewMatchRequest = null; // Clear any pending requests
         // Randomly decide who starts first
         gameRoom.turnIndex = Math.floor(Math.random() * gameRoom.players.length);
         gameRoom.currentTurnPlayerId = gameRoom.players[gameRoom.turnIndex].id;
@@ -236,11 +242,8 @@ io.on('connection', (socket) => {
         io.to(gameId).emit('numberMarked', number); // Emit to all clients in the room
 
         // Check for win condition after marking
-        // The checkBingo logic is client-side, but server confirms state
-        // If a winner is declared by client, it sends 'declareWin'
         if (gameRoom.winnerId) {
              console.log(`Game ${gameId} already has a winner (${gameRoom.winnerId}). No more turns.`);
-             // No need to advance turn if game already won
         } else {
              advanceTurn(gameRoom); // Advance turn after marking
         }
@@ -259,15 +262,93 @@ io.on('connection', (socket) => {
         // Server sets the winner
         gameRoom.winnerId = socket.id;
         gameRoom.gameStarted = false; // End the game
+        gameRoom.currentTurnPlayerId = null; // No one's turn after win
         console.log(`Room ${gameId}: Player ${socket.id} declared win!`);
 
         // Find the username of the winner to send to clients
         const winner = gameRoom.players.find(p => p.id === socket.id);
         const winningUsername = winner ? winner.username : 'Unknown Player';
 
-        // *** CHANGE HERE ***
         io.to(gameId).emit('playerDeclaredWin', { winnerId: socket.id, winningUsername: winningUsername });
         emitGameState(gameId); // Update state to reflect winner and game ended
+    });
+
+    // NEW: Handle request for a new match
+    socket.on('requestNewMatch', () => {
+        const gameId = playerCurrentGameId;
+        const gameRoom = gameRooms.get(gameId);
+
+        if (!gameRoom) {
+            socket.emit('gameError', 'Not in a game room to request a new match.');
+            return;
+        }
+        if (gameRoom.gameStarted) {
+            socket.emit('gameError', 'Game is still in progress. Cannot request new match.');
+            return;
+        }
+        if (gameRoom.players.length < 2) {
+            socket.emit('gameError', 'Need two players to request a new match.');
+            return;
+        }
+        if (gameRoom.pendingNewMatchRequest) {
+            socket.emit('gameError', 'A new match request is already pending.');
+            return;
+        }
+
+        const requester = gameRoom.players.find(p => p.id === socket.id);
+        const opponent = gameRoom.players.find(p => p.id !== socket.id);
+
+        if (requester && opponent) {
+            gameRoom.pendingNewMatchRequest = {
+                requesterId: requester.id,
+                requesterUsername: requester.username
+            };
+            opponent.socket.emit('newMatchRequested', requester.username);
+            console.log(`Room ${gameId}: ${requester.username} requested new match from ${opponent.username}.`);
+            emitGameState(gameId); // Update state to show pending request
+        } else {
+            socket.emit('gameError', 'Opponent not found in room.');
+        }
+    });
+
+    // NEW: Handle accepting a new match
+    socket.on('acceptNewMatch', () => {
+        const gameId = playerCurrentGameId;
+        const gameRoom = gameRooms.get(gameId);
+
+        if (!gameRoom || !gameRoom.pendingNewMatchRequest || gameRoom.pendingNewMatchRequest.requesterId === socket.id) {
+            socket.emit('gameError', 'No pending new match request to accept or you are the requester.');
+            return;
+        }
+
+        console.log(`Room ${gameId}: Player ${gameRoom.players.find(p => p.id === socket.id)?.username} accepted new match.`);
+        resetGameRound(gameId); // Reset the game for a new round
+        io.to(gameId).emit('newMatchAccepted'); // Notify both players
+        emitGameState(gameId); // Ensure state is broadcast after reset
+    });
+
+    // NEW: Handle declining a new match
+    socket.on('declineNewMatch', () => {
+        const gameId = playerCurrentGameId;
+        const gameRoom = gameRooms.get(gameId);
+
+        if (!gameRoom || !gameRoom.pendingNewMatchRequest || gameRoom.pendingNewMatchRequest.requesterId === socket.id) {
+            socket.emit('gameError', 'No pending new match request to decline or you are the requester.');
+            return;
+        }
+
+        const requesterId = gameRoom.pendingNewMatchRequest.requesterId;
+        const requesterSocket = gameRoom.players.find(p => p.id === requesterId)?.socket;
+        const declinerUsername = gameRoom.players.find(p => p.id === socket.id)?.username;
+
+        gameRoom.pendingNewMatchRequest = null; // Clear the pending request
+        console.log(`Room ${gameId}: Player ${declinerUsername} declined new match.`);
+
+        if (requesterSocket) {
+            requesterSocket.emit('newMatchDeclined', declinerUsername);
+        }
+        socket.emit('newMatchDeclined', declinerUsername); // Notify decliner as well
+        emitGameState(gameId); // Update state to clear pending request
     });
 
 
@@ -290,7 +371,7 @@ io.on('connection', (socket) => {
         });
     });
 
-    // Handle game reset request
+    // Handle game reset request (this is now primarily for a full reset, or can be repurposed)
     socket.on('resetGame', () => {
         const gameId = playerCurrentGameId;
         const gameRoom = gameRooms.get(gameId);
@@ -299,7 +380,19 @@ io.on('connection', (socket) => {
             socket.emit('gameError', 'Not in a game room to reset.');
             return;
         }
-        // Allow any player in the room to request a reset
+        // If game is started, prevent direct reset. Must win or disconnect.
+        if (gameRoom.gameStarted) {
+             socket.emit('gameError', 'Game is in progress. Please wait for a winner or disconnect.');
+             return;
+        }
+        // If there's a pending request, prevent direct reset
+        if (gameRoom.pendingNewMatchRequest) {
+            socket.emit('gameError', 'A new match request is pending. Please respond or wait.');
+            return;
+        }
+
+        // This path is now primarily for a full game reset (e.g., after a win, if no request is sent)
+        console.log(`Player ${socket.id} requested full game reset for room ${gameId}.`);
         resetGameRound(gameId);
     });
 
@@ -347,7 +440,6 @@ io.on('connection', (socket) => {
                 }
             }
         }
-        // If player wasn't in a game, nothing to do here
     });
 });
 

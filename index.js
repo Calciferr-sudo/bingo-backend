@@ -1,3 +1,4 @@
+// index.js
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
@@ -17,23 +18,17 @@ const io = socketIO(server, {
 
 const PORT = process.env.PORT || 3000;
 
+// Add a simple /ping endpoint for keep-alive
+app.get('/ping', (req, res) => {
+    console.log('Received /ping request.'); // Log for debugging
+    res.status(200).send('pong');
+});
+
 // --- Game Rooms State ---
 // Stores gameId -> { game_state_object }
 const gameRooms = new Map();
 
 // --- Helper Functions ---
-
-/**
- * Generates a unique, short, and memorable Game ID.
- * @returns {string} A 4-character uppercase alphanumeric ID.
- */
-function generateGameId() {
-    let gameId;
-    do {
-        gameId = Math.random().toString(36).substring(2, 6).toUpperCase();
-    } while (gameRooms.has(gameId)); // Ensure ID is unique
-    return gameId;
-}
 
 /**
  * Emits the current game state for a specific room to all players in that room.
@@ -50,23 +45,70 @@ function emitGameState(gameId) {
     const playersInfo = gameRoom.players.map(p => ({
         id: p.id,
         username: p.username,
-        playerNumber: p.playerNumber // Include playerNumber
+        playerNumber: p.playerNumber,
+        isReady: p.isReady // Include readiness status
     }));
 
     io.to(gameId).emit('gameState', {
-        gameId: gameRoom.gameId,
+        gameId: gameId,
         players: playersInfo,
         gameStarted: gameRoom.gameStarted,
         currentTurnPlayerId: gameRoom.currentTurnPlayerId,
         markedNumbers: gameRoom.markedNumbers,
-        winnerId: gameRoom.winnerId || null, // Add winnerId to state
-        draw: gameRoom.draw || false, // NEW: Add draw state to broadcast
-        pendingNewMatchRequest: gameRoom.pendingNewMatchRequest || null // Include pending request state
+        winnerId: gameRoom.winnerId,
+        draw: gameRoom.draw, // Include draw status
+        pendingNewMatchRequest: gameRoom.pendingNewMatchRequest ? {
+            requesterId: gameRoom.pendingNewMatchRequest.requesterId,
+            requesterUsername: gameRoom.pendingNewMatchRequest.requesterUsername
+        } : null
     });
 }
 
 /**
- * Advances the turn to the next player in the specified game room.
+ * Generates a unique 4-character alphanumeric ID for a game room.
+ * @returns {string} - The generated game ID.
+ */
+function generateGameId() {
+    let result = '';
+    const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const charactersLength = characters.length;
+    for (let i = 0; i < 4; i++) {
+        result += characters.charAt(Math.floor(Math.random() * charactersLength));
+    }
+    // Ensure uniqueness
+    if (gameRooms.has(result)) {
+        return generateGameId(); // Recursively call until unique
+    }
+    return result;
+}
+
+/**
+ * Resets a game room to its initial state for a new round.
+ * @param {string} gameId - The ID of the game room to reset.
+ */
+function resetGameRound(gameId) {
+    const gameRoom = gameRooms.get(gameId);
+    if (gameRoom) {
+        console.log(`Resetting game round for room ${gameId}.`);
+        gameRoom.gameStarted = false;
+        gameRoom.markedNumbers = [];
+        gameRoom.currentTurnPlayerId = null;
+        gameRoom.turnIndex = 0;
+        gameRoom.winnerId = null; // Clear winner
+        gameRoom.draw = false; // Clear draw status
+        gameRoom.pendingNewMatchRequest = null; // Clear any pending requests
+
+        // Reset player readiness for new round
+        gameRoom.players.forEach(p => p.isReady = false);
+
+        io.to(gameId).emit('gameReset'); // Notify clients of reset
+        emitGameState(gameId); // Update clients with new state
+    }
+}
+
+
+/**
+ * Advances the turn to the next player in the game room.
  * @param {object} gameRoom - The game room object.
  */
 function advanceTurn(gameRoom) {
@@ -76,89 +118,52 @@ function advanceTurn(gameRoom) {
     }
     gameRoom.turnIndex = (gameRoom.turnIndex + 1) % gameRoom.players.length;
     gameRoom.currentTurnPlayerId = gameRoom.players[gameRoom.turnIndex].id;
-    console.log(`Room ${gameRoom.gameId}: Turn advanced to ${gameRoom.currentTurnPlayerId}`);
-    emitGameState(gameRoom.gameId);
-}
-
-/**
- * Resets a specific game room to its initial state for a new round.
- * @param {string} gameId - The ID of the game room to reset.
- */
-function resetGameRound(gameId) {
-    const gameRoom = gameRooms.get(gameId);
-    if (!gameRoom) {
-        console.error(`Attempted to reset non-existent game room: ${gameId}`);
-        return;
-    }
-
-    console.log(`Resetting game room: ${gameId}`);
-    gameRoom.gameStarted = false;
-    gameRoom.currentTurnPlayerId = null;
-    gameRoom.markedNumbers = [];
-    gameRoom.turnIndex = 0;
-    gameRoom.winnerId = null; // Clear winner
-    gameRoom.draw = false; // NEW: Clear draw state
-    gameRoom.pendingNewMatchRequest = null; // Clear any pending requests
-
-    // Re-assign player numbers in case players left/joined
-    gameRoom.players.forEach((p, idx) => {
-        p.playerNumber = idx + 1;
-    });
-
-    io.to(gameId).emit('gameReset'); // Notify clients about reset
-    emitGameState(gameId); // Send new state
+    console.log(`Turn advanced in room ${gameRoom.gameId}. Current turn: ${gameRoom.currentTurnPlayerId}`);
 }
 
 // --- Socket.IO Connection Handling ---
 io.on('connection', (socket) => {
-    console.log(`Player connected: ${socket.id}`);
+    console.log('A user connected:', socket.id);
 
-    // Store the gameId the player is currently in
-    let playerCurrentGameId = null;
+    let playerCurrentGameId = null; // To keep track of the gameId this socket is in
 
-    // Handle game creation
+    // --- Lobby Actions ---
+
+    // Create Game
     socket.on('createGame', (username) => {
         if (playerCurrentGameId) {
-            socket.emit('gameError', 'You are already in a game. Please leave or reset it first.');
+            socket.emit('gameError', 'Already in a game. Please leave first.');
             return;
         }
 
         const gameId = generateGameId();
         const newGameRoom = {
             gameId: gameId,
-            players: [], // { id, socket, username, playerNumber }
+            players: [], // { id, username, playerNumber, isReady }
             gameStarted: false,
+            markedNumbers: [], // Numbers called in this game
             currentTurnPlayerId: null,
-            markedNumbers: [],
             turnIndex: 0,
-            winnerId: null,
-            draw: false, // NEW: Initialize draw state
-            pendingNewMatchRequest: null // Initialize pending request state
+            winnerId: null, // ID of the player who won
+            draw: false, // true if game ended in a draw
+            pendingNewMatchRequest: null // { requesterId, requesterUsername }
         };
         gameRooms.set(gameId, newGameRoom);
-
-        socket.join(gameId);
         playerCurrentGameId = gameId;
 
-        // Add player to the room
-        newGameRoom.players.push({
-            id: socket.id,
-            socket: socket,
-            username: username,
-            playerNumber: newGameRoom.players.length + 1
-        });
-        console.log(`Player ${username} (${socket.id}) created and joined game room: ${gameId}`);
-
+        const playerNumber = newGameRoom.players.length + 1;
+        newGameRoom.players.push({ id: socket.id, username: username, playerNumber: playerNumber, isReady: false });
+        socket.join(gameId);
         socket.emit('gameCreated', gameId);
+        console.log(`Player ${username} (${socket.id}) created and joined game ${gameId}`);
+        io.to(gameId).emit('userJoined', username); // Notify others in room
         emitGameState(gameId);
-        // Announce new player to existing players in the room (if any)
-        io.to(gameId).emit('userJoined', username);
     });
 
-    // Handle joining a game
+    // Join Game
     socket.on('joinGame', (gameId, username) => {
         if (playerCurrentGameId) {
-            socket.emit('gameError', 'You are already in a game. Please leave or reset it first.');
+            socket.emit('gameError', 'Already in a game. Please leave first.');
             return;
         }
 
@@ -167,34 +172,69 @@ io.on('connection', (socket) => {
             socket.emit('gameError', 'Game not found. Please check the ID.');
             return;
         }
+
         if (gameRoom.players.length >= 2) {
             socket.emit('gameError', 'Game room is full (max 2 players).');
             return;
         }
         if (gameRoom.gameStarted) {
-            socket.emit('gameError', 'Game has already started.');
+            socket.emit('gameError', 'Game has already started. Cannot join.');
             return;
         }
 
-        socket.join(gameId);
         playerCurrentGameId = gameId;
-
-        // Add player to the room
-        gameRoom.players.push({
-            id: socket.id,
-            socket: socket,
-            username: username,
-            playerNumber: gameRoom.players.length + 1 // Assign player number
-        });
-        console.log(`Player ${username} (${socket.id}) joined game room: ${gameId}`);
-
+        const playerNumber = gameRoom.players.length + 1;
+        gameRoom.players.push({ id: socket.id, username: username, playerNumber: playerNumber, isReady: false });
+        socket.join(gameId);
         socket.emit('gameJoined', gameId);
+        console.log(`Player ${username} (${socket.id}) joined game ${gameId}`);
+        io.to(gameId).emit('userJoined', username); // Notify others in room
         emitGameState(gameId);
-        // Announce new player to existing players in the room
-        io.to(gameId).emit('userJoined', username);
     });
 
-    // Handle starting the game
+    // Player leaves game
+    socket.on('leaveGame', () => {
+        const gameId = playerCurrentGameId;
+        if (!gameId) {
+            socket.emit('gameError', 'Not in a game.');
+            return;
+        }
+
+        const gameRoom = gameRooms.get(gameId);
+        if (gameRoom) {
+            // Remove player from the game room
+            gameRoom.players = gameRoom.players.filter(p => p.id !== socket.id);
+            console.log(`Player ${socket.id} left room ${gameId}. Remaining players: ${gameRoom.players.length}`);
+
+            // Notify other players
+            const leavingPlayer = gameRoom.players.find(p => p.id === socket.id); // This will be undefined after filter
+            const leavingUsername = (leavingPlayer && leavingPlayer.username) || 'A player'; // Get name before it's gone
+            io.to(gameId).emit('userLeft', leavingUsername);
+
+            // If game was started and now less than 2 players, reset game round
+            if (gameRoom.gameStarted && gameRoom.players.length < 2) {
+                console.log(`Not enough players in room ${gameId}. Game round ended.`);
+                resetGameRound(gameId); // This also handles emitting gameState
+            } else if (gameRoom.players.length === 0) {
+                // If no players left, clean up the game room
+                console.log(`Last player left room ${gameId}. Deleting room.`);
+                gameRooms.delete(gameId);
+            } else {
+                // If players remain, re-evaluate turn and emit updated state
+                if (gameRoom.currentTurnPlayerId === socket.id && gameRoom.gameStarted) {
+                    advanceTurn(gameRoom); // Advance turn if it was their turn
+                }
+                emitGameState(gameId); // Update state for remaining players
+            }
+        }
+        socket.leave(gameId);
+        playerCurrentGameId = null; // Clear the player's current game ID
+    });
+
+
+    // --- Game Actions ---
+
+    // Start Game
     socket.on('startGame', () => {
         const gameId = playerCurrentGameId;
         const gameRoom = gameRooms.get(gameId);
@@ -212,24 +252,22 @@ io.on('connection', (socket) => {
             return;
         }
 
+        // Mark all players as ready (or implement a ready-up system if desired)
+        gameRoom.players.forEach(p => p.isReady = true);
+
         gameRoom.gameStarted = true;
-        gameRoom.winnerId = null; // Clear winner for new round
-        gameRoom.draw = false; // NEW: Clear draw state for new round
-        gameRoom.pendingNewMatchRequest = null; // Clear any pending requests
-        // Randomly decide who starts first
-        gameRoom.turnIndex = Math.floor(Math.random() * gameRoom.players.length);
-        gameRoom.currentTurnPlayerId = gameRoom.players[gameRoom.turnIndex].id;
-        console.log(`Game ${gameId} started. Player ${gameRoom.players[gameRoom.turnIndex].username} (${gameRoom.currentTurnPlayerId}) starts.`);
+        gameRoom.currentTurnPlayerId = gameRoom.players[0].id; // First player starts
+        console.log(`Game ${gameId} started. Player ${gameRoom.currentTurnPlayerId} starts.`);
         emitGameState(gameId);
     });
 
-    // Handle marking a number
+    // Mark Number
     socket.on('markNumber', (number) => {
         const gameId = playerCurrentGameId;
         const gameRoom = gameRooms.get(gameId);
 
-        if (!gameRoom || !gameRoom.gameStarted) {
-            socket.emit('gameError', 'Game not active or not started.');
+        if (!gameRoom || !gameRoom.gameStarted || gameRoom.winnerId || gameRoom.draw) {
+            socket.emit('gameError', 'Game not active or already ended.');
             return;
         }
         if (gameRoom.currentTurnPlayerId !== socket.id) {
@@ -242,49 +280,60 @@ io.on('connection', (socket) => {
         }
 
         gameRoom.markedNumbers.push(number);
-        console.log(`Room ${gameId}: Player ${socket.id} marked number: ${number}`);
-        io.to(gameId).emit('numberMarked', number); // Emit to all clients in the room
-
-        // Check for win condition after marking
-        // If there's already a winner or it's a draw, don't advance turn
-        if (gameRoom.winnerId || gameRoom.draw) { // NEW: Check for draw as well
-             console.log(`Game ${gameId} already has a winner (${gameRoom.winnerId}) or is a draw. No more turns.`);
-        } else {
-             advanceTurn(gameRoom); // Advance turn after marking
-        }
+        console.log(`Room ${gameId}: Player ${socket.id} marked number ${number}.`);
+        io.to(gameId).emit('numberMarked', number); // Broadcast to all players
+        advanceTurn(gameRoom); // Advance turn after number is marked
+        emitGameState(gameId); // Update state
     });
 
-    // Handle a player declaring Bingo/Win
+    // Declare Win
     socket.on('declareWin', () => {
         const gameId = playerCurrentGameId;
         const gameRoom = gameRooms.get(gameId);
 
-        if (!gameRoom || gameRoom.gameStarted === false || gameRoom.draw === true) { // NEW: Check if game is already not started or is a draw
-            // This means another player already won or declared a win on the same turn.
-            // Or the game state is already in a draw.
+        if (!gameRoom || gameRoom.gameStarted === false || gameRoom.draw === true) {
+            // Case 1: Game is not active, already won, or already a draw.
+            // If it's won by another player and this declareWin comes in for the same game context, it's a draw.
             if (gameRoom && gameRoom.winnerId && gameRoom.winnerId !== socket.id) {
-                // If there's already a winner and it's not THIS player, it's a simultaneous win (draw)
-                gameRoom.draw = true; // Set draw state
-                gameRoom.gameStarted = false; // Ensure game is marked as not started
-                gameRoom.currentTurnPlayerId = null; // No one's turn in a draw
-                console.log(`Room ${gameId}: Simultaneous win detected! Player ${socket.id} also declared win.`);
-                const lastMarkedNumber = gameRoom.markedNumbers[gameRoom.markedNumbers.length - 1]; // Get the number that caused the draw
-                io.to(gameId).emit('gameDraw', { number: lastMarkedNumber }); // NEW: Emit draw event
-                emitGameState(gameId); // Update state to reflect draw
+                // This means the first player's win was registered, and this player also got Bingo on the same turn.
+                if (!gameRoom.draw) { // Only transition to draw if not already set
+                    gameRoom.draw = true;
+                    gameRoom.gameStarted = false;
+                    gameRoom.currentTurnPlayerId = null;
+                    console.log(`Room ${gameId}: Simultaneous win detected! Player ${socket.id} also declared win.`);
+                    const lastMarkedNumber = gameRoom.markedNumbers[gameRoom.markedNumbers.length - 1]; // Get the number that caused the draw
+                    io.to(gameId).emit('gameDraw', { number: lastMarkedNumber }); // Emit draw event
+                    emitGameState(gameId); // Ensure draw state is broadcast
+                }
             } else {
-                // This is a genuine error, e.g., trying to declare win when game hasn't started
+                // Genuine error: trying to declare win when game hasn't started or already won by *this* player
                 socket.emit('gameError', 'Cannot declare win. Game not active or already won.');
             }
             return;
         }
 
-        // Server sets the winner
+        // --- Critical point: Check game state *before* setting winner ---
+        // If a winner is *already* set by another player (due to a race condition) when *this* 'declareWin' is processed
+        if (gameRoom.winnerId && gameRoom.winnerId !== socket.id) {
+            // This is the second player to hit declareWin almost simultaneously
+            if (!gameRoom.draw) { // Only transition to draw if not already set
+                gameRoom.draw = true;
+                gameRoom.gameStarted = false;
+                gameRoom.currentTurnPlayerId = null;
+                console.log(`Room ${gameId}: Simultaneous win detected! Player ${socket.id} also declared win.`);
+                const lastMarkedNumber = gameRoom.markedNumbers[gameRoom.markedNumbers.length - 1]; // Get the number that caused the draw
+                io.to(gameId).emit('gameDraw', { number: lastMarkedNumber }); // Emit draw event
+                emitGameState(gameId); // Ensure draw state is broadcast
+            }
+            return; // Exit, as it's now a draw, not a single winner
+        }
+
+        // If no winner was set before, this player is the first to declare win
         gameRoom.winnerId = socket.id;
         gameRoom.gameStarted = false; // End the game
         gameRoom.currentTurnPlayerId = null; // No one's turn after win
         console.log(`Room ${gameId}: Player ${socket.id} declared win!`);
 
-        // Find the username of the winner to send to clients
         const winner = gameRoom.players.find(p => p.id === socket.id);
         const winningUsername = winner ? winner.username : 'Unknown Player';
 
@@ -292,149 +341,116 @@ io.on('connection', (socket) => {
         emitGameState(gameId); // Update state to reflect winner and game ended
     });
 
-    // Handle request for a new match
+
+    // Request New Match
     socket.on('requestNewMatch', () => {
         const gameId = playerCurrentGameId;
         const gameRoom = gameRooms.get(gameId);
 
-        if (!gameRoom) {
-            socket.emit('gameError', 'Not in a game room to request a new match.');
+        if (!gameRoom || gameRoom.gameStarted || (!gameRoom.winnerId && !gameRoom.draw)) {
+            socket.emit('gameError', 'Cannot request a new match. Game must be ended (won/draw).');
             return;
         }
-        if (gameRoom.gameStarted) {
-            socket.emit('gameError', 'Game is still in progress. Cannot request new match.');
-            return;
-        }
-        if (gameRoom.players.length < 2) {
-            socket.emit('gameError', 'Need two players to request a new match.');
-            return;
-        }
+
         if (gameRoom.pendingNewMatchRequest) {
             socket.emit('gameError', 'A new match request is already pending.');
             return;
         }
 
         const requester = gameRoom.players.find(p => p.id === socket.id);
-        const opponent = gameRoom.players.find(p => p.id !== socket.id);
-
-        if (requester && opponent) {
-            gameRoom.pendingNewMatchRequest = {
-                requesterId: requester.id,
-                requesterUsername: requester.username
-            };
-            opponent.socket.emit('newMatchRequested', requester.username);
-            console.log(`Room ${gameId}: ${requester.username} requested new match from ${opponent.username}.`);
-            emitGameState(gameId); // Update state to show pending request
-        } else {
-            socket.emit('gameError', 'Opponent not found in room.');
+        if (!requester) {
+            socket.emit('gameError', 'Requester not found in room.');
+            return;
         }
+
+        gameRoom.pendingNewMatchRequest = {
+            requesterId: socket.id,
+            requesterUsername: requester.username
+        };
+        console.log(`Room ${gameId}: Player ${requester.username} requested a new match.`);
+
+        // Emit to all players in the room, including the requester
+        io.to(gameId).emit('newMatchRequested', requester.username);
+        emitGameState(gameId); // Update state with pending request
     });
 
-    // Handle accepting a new match
+    // Accept New Match
     socket.on('acceptNewMatch', () => {
         const gameId = playerCurrentGameId;
         const gameRoom = gameRooms.get(gameId);
 
-        if (!gameRoom || !gameRoom.pendingNewMatchRequest || gameRoom.pendingNewMatchRequest.requesterId === socket.id) {
-            socket.emit('gameError', 'No pending new match request to accept or you are the requester.');
+        if (!gameRoom || !gameRoom.pendingNewMatchRequest) {
+            socket.emit('gameError', 'No new match request pending.');
             return;
         }
 
-        console.log(`Room ${gameId}: Player ${gameRoom.players.find(p => p.id === socket.id)?.username} accepted new match.`);
+        // Ensure the acceptor is not the requester
+        if (gameRoom.pendingNewMatchRequest.requesterId === socket.id) {
+            socket.emit('gameError', 'You cannot accept your own request.');
+            return;
+        }
+
+        console.log(`Room ${gameId}: Player ${socket.id} accepted new match request.`);
+        gameRoom.pendingNewMatchRequest = null; // Clear pending request
         resetGameRound(gameId); // Reset the game for a new round
-        io.to(gameId).emit('newMatchAccepted'); // Notify both players
-        emitGameState(gameId); // Ensure state is broadcast after reset
+        io.to(gameId).emit('newMatchAccepted'); // Notify clients that it was accepted
     });
 
-    // Handle declining a new match
+    // Decline New Match
     socket.on('declineNewMatch', () => {
         const gameId = playerCurrentGameId;
         const gameRoom = gameRooms.get(gameId);
 
-        if (!gameRoom || !gameRoom.pendingNewMatchRequest || gameRoom.pendingNewMatchRequest.requesterId === socket.id) {
-            socket.emit('gameError', 'No pending new match request to decline or you are the requester.');
+        if (!gameRoom || !gameRoom.pendingNewMatchRequest) {
+            socket.emit('gameError', 'No new match request pending.');
             return;
         }
 
-        const requesterId = gameRoom.pendingNewMatchRequest.requesterId;
-        const requesterSocket = gameRoom.players.find(p => p.id === requesterId)?.socket;
-        const declinerUsername = gameRoom.players.find(p => p.id === socket.id)?.username;
+        const decliner = gameRoom.players.find(p => p.id === socket.id);
+        const declinerUsername = decliner ? decliner.username : 'Unknown Player';
 
-        gameRoom.pendingNewMatchRequest = null; // Clear the pending request
-        console.log(`Room ${gameId}: Player ${declinerUsername} declined new match.`);
-
-        if (requesterSocket) {
-            requesterSocket.emit('newMatchDeclined', declinerUsername);
-        }
-        socket.emit('newMatchDeclined', declinerUsername); // Notify decliner as well
-        emitGameState(gameId); // Update state to clear pending request
+        console.log(`Room ${gameId}: Player ${socket.id} declined new match request.`);
+        gameRoom.pendingNewMatchRequest = null; // Clear pending request
+        io.to(gameId).emit('newMatchDeclined', declinerUsername); // Notify clients that it was declined
+        emitGameState(gameId); // Update state after declining
     });
 
 
-    // Handle chat messages
+    // Chat Message
     socket.on('sendMessage', (message) => {
         const gameId = playerCurrentGameId;
         const gameRoom = gameRooms.get(gameId);
 
         if (!gameRoom) {
-            socket.emit('gameError', 'Not in a game room to send messages.');
+            socket.emit('gameError', 'Not in a game to send messages.');
             return;
         }
 
         const sender = gameRoom.players.find(p => p.id === socket.id);
         const senderUsername = sender ? sender.username : `Player-${socket.id.substring(0, 4)}`;
 
-        io.to(gameId).emit('message', {
-            senderId: senderUsername, // Send username instead of raw ID
-            message: message
-        });
+        console.log(`Room ${gameId} - Chat: [${senderUsername}] ${message}`);
+        io.to(gameId).emit('message', { senderId: senderUsername, message: message });
     });
 
-    // Handle game reset request (this is now primarily for a full reset, or can be repurposed)
-    socket.on('resetGame', () => {
+
+    // --- Disconnection Handling ---
+    socket.on('disconnect', () => {
+        console.log('User disconnected:', socket.id);
         const gameId = playerCurrentGameId;
         const gameRoom = gameRooms.get(gameId);
 
-        if (!gameRoom) {
-            socket.emit('gameError', 'Not in a game room to reset.');
-            return;
-        }
-        // If game is started, prevent direct reset. Must win or disconnect.
-        if (gameRoom.gameStarted) {
-             socket.emit('gameError', 'Game is in progress. Please wait for a winner or disconnect.');
-             return;
-        }
-        // If there's a pending request, prevent direct reset
-        if (gameRoom.pendingNewMatchRequest) {
-            socket.emit('gameError', 'A new match request is pending. Please respond or wait.');
-            return;
-        }
-
-        // This path is now primarily for a full game reset (e.g., after a win, if no request is sent)
-        console.log(`Player ${socket.id} requested full game reset for room ${gameId}.`);
-        resetGameRound(gameId);
-    });
-
-    // Handle player explicitly leaving the game room
-    socket.on('leaveGame', () => {
-        console.log(`Player ${socket.id} explicitly leaving game.`);
-        const gameId = playerCurrentGameId;
-
-        if (gameId && gameRooms.has(gameId)) {
-            const gameRoom = gameRooms.get(gameId);
+        if (gameRoom) {
             const leavingPlayer = gameRoom.players.find(p => p.id === socket.id);
-            const leavingUsername = leavingPlayer ? leavingPlayer.username : 'Unknown Player';
+            const leavingUsername = (leavingPlayer && leavingPlayer.username) || 'A player';
 
-            // Remove player from the room's player list
             gameRoom.players = gameRoom.players.filter(p => p.id !== socket.id);
-            console.log(`Player ${leavingUsername} (${socket.id}) left room ${gameId}.`);
-            io.to(gameId).emit('userLeft', leavingUsername); // Notify others in the room
+            console.log(`Player ${leavingUsername} (${socket.id}) disconnected from room ${gameId}. Remaining players: ${gameRoom.players.length}`);
 
-            // Leave the Socket.IO room
-            socket.leave(gameId);
-            playerCurrentGameId = null; // Clear the game ID on the socket
+            // Notify remaining players about disconnection
+            io.to(gameId).emit('userLeft', leavingUsername);
 
-            // If the leaving player was the current turn holder, advance turn
+            // If it was the disconnected player's turn, advance turn
             if (gameRoom.currentTurnPlayerId === socket.id && gameRoom.gameStarted) {
                 if (gameRoom.players.length > 0) {
                     // Re-calculate turnIndex to avoid out-of-bounds if the current player was removed
@@ -443,7 +459,7 @@ io.on('connection', (socket) => {
                     advanceTurn(gameRoom);
                 } else {
                     // No players left, clean up the game room
-                    console.log(`Last player left from room ${gameId}. Deleting room.`);
+                    console.log(`Last player disconnected from room ${gameId}. Deleting room.`);
                     gameRooms.delete(gameId);
                 }
             }
@@ -453,61 +469,13 @@ io.on('connection', (socket) => {
                 console.log(`Not enough players in room ${gameId}. Game round ended.`);
                 resetGameRound(gameId);
             }
-
+            
             // If the room still exists (e.g., one player left), emit updated state
             if (gameRooms.has(gameId)) {
                 emitGameState(gameId);
-            } else {
-                // If the room was deleted, ensure no state is emitted for it.
             }
         }
-    });
-
-
-    // Handle player disconnection (browser tab close, network issue)
-    socket.on('disconnect', () => {
-        console.log(`Player disconnected: ${socket.id}`);
-
-        // Use playerCurrentGameId to find the room they were in
-        if (playerCurrentGameId) {
-            const gameId = playerCurrentGameId;
-            const gameRoom = gameRooms.get(gameId);
-
-            if (gameRoom) {
-                const disconnectedPlayer = gameRoom.players.find(p => p.id === socket.id);
-                const disconnectedUsername = disconnectedPlayer ? disconnectedPlayer.username : 'Unknown Player';
-
-                // Remove player from the room's player list
-                gameRoom.players = gameRoom.players.filter(p => p.id !== socket.id);
-                console.log(`Player ${disconnectedUsername} (${socket.id}) disconnected from room ${gameId}.`);
-                io.to(gameId).emit('userLeft', disconnectedUsername); // Notify others in the room
-
-                // If the disconnected player was the current turn holder, advance turn
-                if (gameRoom.currentTurnPlayerId === socket.id && gameRoom.gameStarted) {
-                    if (gameRoom.players.length > 0) {
-                        // Re-calculate turnIndex to avoid out-of-bounds if the current player was removed
-                        const currentTurnPlayerIndex = gameRoom.players.findIndex(p => p.id === gameRoom.currentTurnPlayerId);
-                        gameRoom.turnIndex = (currentTurnPlayerIndex === -1) ? 0 : currentTurnPlayerIndex; // Reset to 0 or current turn if still valid
-                        advanceTurn(gameRoom);
-                    } else {
-                        // No players left, clean up the game room
-                        console.log(`Last player disconnected from room ${gameId}. Deleting room.`);
-                        gameRooms.delete(gameId);
-                    }
-                }
-
-                // If game was started and now less than 2 players, reset game round
-                if (gameRoom.gameStarted && gameRoom.players.length < 2) {
-                    console.log(`Not enough players in room ${gameId}. Game round ended.`);
-                    resetGameRound(gameId);
-                }
-
-                // If the room still exists (e.g., one player left), emit updated state
-                if (gameRooms.has(gameId)) {
-                    emitGameState(gameId);
-                }
-            }
-        }
+        // If player wasn't in a game, nothing to do here
     });
 });
 

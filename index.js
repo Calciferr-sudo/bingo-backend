@@ -6,275 +6,306 @@ const socketIO = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-const FRONTEND_URL = 'https://bingo-multiplayer.pages.dev'; // <--- !!! ENSURE THIS MATCHES YOUR DEPLOYED FRONTEND URL !!!
+// IMPORTANT: Set your frontend's actual URL here.
+// If running locally with Live Server, it's often http://127.0.0.1:5500 or http://localhost:5500
+// If hosted on Render, it would be https://your-frontend-app-name.onrender.com
+const FRONTEND_URL = 'https://bingo-multiplayer.pages.dev'; // <--- !!! CHANGE THIS !!!
 
 const io = socketIO(server, {
     cors: {
-        origin: FRONTEND_URL,
+        origin:FRONTEND_URL,
         methods: ['GET', 'POST']
     }
 });
 
 const PORT = process.env.PORT || 3000;
 
-// --- Global Game States ---
-// Stores game states by gameId: { gameId: { players: [], gameStarted: false, ... } }
-let games = {};
+// --- Global Game State Storage ---
+// Using a Map to store multiple game rooms, keyed by gameId
+const games = new Map(); // gameId -> { players: [], gameStarted: false, currentTurnPlayerId: null, markedNumbers: [], turnIndex: 0 }
 
-// Helper to generate a unique 6-character alphanumeric game ID
-function generateGameId() {
-    let id;
-    do {
-        id = Math.random().toString(36).substring(2, 8).toUpperCase();
-    } while (games[id]); // Ensure ID is unique
-    return id;
-}
-
-// --- Helper Functions for Game Logic (now adapted for rooms) ---
+// --- Helper Functions ---
 
 /**
- * Emits the current game state to all connected players in a specific room.
- * @param {string} gameId - The ID of the game room.
+ * Generates a unique, short game ID.
+ * @returns {string} A 6-character uppercase alphanumeric ID.
+ */
+function generateGameId() {
+    const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let result = '';
+    for (let i = 0; i < 6; i++) {
+        result += characters.charAt(Math.floor(Math.random() * characters.length));
+    }
+    return result;
+}
+
+/**
+ * Emits the current game state for a specific game room to all players in that room.
+ * This keeps all clients synchronized.
+ * @param {string} gameId - The ID of the game room to emit state for.
  */
 function emitGameState(gameId) {
-    const game = games[gameId];
-    if (game) {
-        io.to(gameId).emit('gameState', {
-            gameStarted: game.gameStarted,
-            currentTurnPlayerId: game.currentTurnPlayerId,
-            markedNumbers: game.markedNumbers,
-            players: game.players.map(p => ({ id: p.id, name: p.name || 'Player' })), // Include player names if added later
-            gameId: gameId // Send gameId back to client
-        });
-        console.log(`[Game ${gameId}] Emitted gameState. Players: ${game.players.length}`);
-    }
-}
-
-/**
- * Advances the turn to the next player in a specific game room.
- * @param {string} gameId - The ID of the game room.
- */
-function advanceTurn(gameId) {
-    const game = games[gameId];
-    if (!game || !game.gameStarted || game.players.length === 0) {
+    const game = games.get(gameId);
+    if (!game) {
+        console.error(`Attempted to emit state for non-existent game: ${gameId}`);
         return;
     }
 
+    const state = {
+        gameId: gameId,
+        players: game.players.map(p => ({ id: p.id })), // Send only IDs to clients
+        gameStarted: game.gameStarted,
+        currentTurnPlayerId: game.currentTurnPlayerId,
+        markedNumbers: game.markedNumbers,
+        turnIndex: game.turnIndex
+    };
+    io.to(gameId).emit('gameState', state);
+    console.log(`Emitted gameState for game ${gameId}. Started: ${game.gameStarted}, Turn: ${game.currentTurnPlayerId ? game.currentTurnPlayerId.substring(0,5) : 'N/A'}`);
+}
+
+/**
+ * Advances the turn to the next player in the current game.
+ * @param {string} gameId - The ID of the game to advance turn for.
+ */
+function advanceTurn(gameId) {
+    const game = games.get(gameId);
+    if (!game || game.players.length === 0) {
+        console.log(`Cannot advance turn for game ${gameId}: game not found or no players.`);
+        return;
+    }
     game.turnIndex = (game.turnIndex + 1) % game.players.length;
     game.currentTurnPlayerId = game.players[game.turnIndex].id;
-    console.log(`[Game ${gameId}] It's now player ${game.currentTurnPlayerId}'s turn.`);
-    emitGameState(gameId); // Notify clients of turn change
+    console.log(`Game ${gameId}: Turn advanced to ${game.currentTurnPlayerId}`);
+    emitGameState(gameId); // Update clients
 }
 
 /**
- * Resets the game state for a specific game room.
- * @param {string} gameId - The ID of the game room.
+ * Resets the state of a specific game room.
+ * @param {string} gameId - The ID of the game to reset.
  */
 function resetGame(gameId) {
-    const game = games[gameId];
-    if (game) {
-        console.log(`[Game ${gameId}] Game is being reset.`);
-        game.gameStarted = false;
-        game.currentTurnPlayerId = null;
-        game.markedNumbers = [];
-        game.turnIndex = 0;
-        io.to(gameId).emit('gameReset'); // Notify all clients in the room
-        emitGameState(gameId); // Send initial state after reset
+    const game = games.get(gameId);
+    if (!game) {
+        console.error(`Attempted to reset non-existent game: ${gameId}`);
+        return;
     }
+
+    game.gameStarted = false;
+    game.currentTurnPlayerId = null;
+    game.markedNumbers = [];
+    game.turnIndex = 0;
+    // Keep players in the room, just reset game state
+    game.players.forEach(p => p.socket.emit('gameReset')); // Notify players in the room
+    console.log(`Game ${gameId} has been reset.`);
+    emitGameState(gameId); // Update clients with new state
 }
-
-/**
- * Removes a player from a game room. If the room becomes empty, it's deleted.
- * @param {string} gameId - The ID of the game room.
- * @param {string} playerId - The ID of the player to remove.
- */
-function removePlayerFromGame(gameId, playerId) {
-    const game = games[gameId];
-    if (game) {
-        const initialPlayerCount = game.players.length;
-        game.players = game.players.filter(p => p.id !== playerId);
-        console.log(`[Game ${gameId}] Player ${playerId} removed. Remaining: ${game.players.length}`);
-
-        if (game.players.length === 0) {
-            console.log(`[Game ${gameId}] Game room is empty, deleting.`);
-            delete games[gameId]; // Delete the game if no players are left
-        } else {
-            // If the disconnected player was the current turn holder, advance turn
-            if (game.currentTurnPlayerId === playerId && game.gameStarted) {
-                advanceTurn(gameId);
-            }
-            // If game was started and now less than 2 players, reset game
-            if (game.gameStarted && game.players.length < 2) {
-                console.log(`[Game ${gameId}] Not enough players (${game.players.length}). Game ended.`);
-                resetGame(gameId);
-            }
-            emitGameState(gameId); // Update remaining players in the room
-        }
-    }
-}
-
 
 // --- Socket.IO Connection Handling ---
 io.on('connection', (socket) => {
-    console.log(`Player connected: ${socket.id}`);
+    console.log(`A player connected: ${socket.id}`);
 
-    // Store the gameId the player is currently in
-    let playerGameId = null;
+    // Store the gameId for this socket directly on the socket object
+    socket.playerGameId = null;
 
-    // Handle 'createGame' request
+    // Handle creating a new game
     socket.on('createGame', () => {
-        if (playerGameId) {
-            socket.emit('error', 'You are already in a game. Please leave current game first.');
-            return;
-        }
+        let gameId;
+        do {
+            gameId = generateGameId();
+        } while (games.has(gameId)); // Ensure ID is unique
 
-        const gameId = generateGameId();
-        games[gameId] = {
-            players: [],
+        games.set(gameId, {
+            players: [{ id: socket.id, socket: socket }],
             gameStarted: false,
             currentTurnPlayerId: null,
             markedNumbers: [],
-            turnIndex: 0,
-            hostId: socket.id // Store the host ID if needed
-        };
-        playerGameId = gameId; // Assign this player to the new game
-
-        socket.join(gameId); // Join the Socket.IO room
-        games[gameId].players.push({ id: socket.id, socket: socket }); // Add player to game state
-
-        games[gameId].currentTurnPlayerId = socket.id; // Host starts as first turn
-        console.log(`Player ${socket.id} created game: ${gameId}`);
-        socket.emit('gameCreated', gameId); // Tell client the new game ID
-        emitGameState(gameId); // Send initial state for this room
-    });
-
-    // Handle 'joinGame' request
-    socket.on('joinGame', (gameId) => {
-        if (playerGameId) {
-            socket.emit('error', 'You are already in a game. Please leave current game first.');
-            return;
-        }
-
-        const game = games[gameId];
-        if (!game) {
-            socket.emit('gameError', 'Game ID not found.');
-            console.log(`Player ${socket.id} tried to join non-existent game: ${gameId}`);
-            return;
-        }
-        if (game.gameStarted) {
-            socket.emit('gameError', 'Game has already started.');
-            console.log(`Player ${socket.id} tried to join started game: ${gameId}`);
-            return;
-        }
-
-        // Add player to game state
-        game.players.push({ id: socket.id, socket: socket });
-        playerGameId = gameId; // Assign this player to the game
-
-        socket.join(gameId); // Join the Socket.IO room
-        console.log(`Player ${socket.id} joined game: ${gameId}`);
-
-        // If this is the second player, assign turn to the first player if not set
-        if (game.players.length === 2 && !game.currentTurnPlayerId) {
-            game.currentTurnPlayerId = game.players[0].id;
-        }
-        socket.emit('gameJoined', gameId); // Confirm successful join
-        emitGameState(gameId); // Send updated state to all in room
-    });
-
-    // Handle 'startGame' request (now per gameId)
-    socket.on('startGame', () => {
-        const game = games[playerGameId];
-        if (!game) {
-            socket.emit('error', 'You are not in a game.');
-            return;
-        }
-        if (!game.gameStarted && game.players.length >= 2) {
-            game.gameStarted = true;
-            game.turnIndex = 0;
-            game.currentTurnPlayerId = game.players[game.turnIndex].id;
-            game.markedNumbers = [];
-            console.log(`[Game ${playerGameId}] Game started!`);
-            emitGameState(playerGameId);
-        } else if (game.gameStarted) {
-            socket.emit('error', 'Game already in progress.');
-        } else {
-            socket.emit('error', 'Need at least 2 players to start the game.');
-        }
-    });
-
-    // Handle number marking (now per gameId)
-    socket.on('markNumber', (num) => {
-        const game = games[playerGameId];
-        if (!game) {
-            socket.emit('error', 'You are not in a game.');
-            return;
-        }
-        if (game.gameStarted && socket.id === game.currentTurnPlayerId && !game.markedNumbers.includes(num)) {
-            game.markedNumbers.push(num);
-            console.log(`[Game ${playerGameId}] Number marked by ${socket.id}: ${num}`);
-            io.to(playerGameId).emit('numberMarked', num); // Broadcast to all in room
-            advanceTurn(playerGameId);
-        } else if (!game.gameStarted) {
-            socket.emit('error', 'Game not started. Cannot mark numbers.');
-        } else if (socket.id !== game.currentTurnPlayerId) {
-            socket.emit('error', 'It is not your turn.');
-        } else if (game.markedNumbers.includes(num)) {
-            socket.emit('error', 'This number has already been called.');
-        }
-    });
-
-    // Handle player declaring Bingo/Win (now per gameId)
-    socket.on('declareWin', () => {
-        const game = games[playerGameId];
-        if (!game) {
-            socket.emit('error', 'You are not in a game.');
-            return;
-        }
-        if (game.gameStarted && socket.id === game.currentTurnPlayerId) {
-            console.log(`[Game ${playerGameId}] Player ${socket.id} declared win!`);
-            game.gameStarted = false;
-            io.to(playerGameId).emit('playerDeclaredWin', socket.id);
-        } else if (!game.gameStarted) {
-            socket.emit('error', 'Game is not active. Cannot declare win.');
-        } else {
-            socket.emit('error', 'It is not your turn to declare win.');
-        }
-    });
-
-    // Handle chat messages (now per gameId)
-    socket.on('sendMessage', (message) => {
-        if (!playerGameId) {
-            socket.emit('error', 'You must join a game to send messages.');
-            return;
-        }
-        console.log(`[Game ${playerGameId}] Message from ${socket.id}: ${message}`);
-        io.to(playerGameId).emit('message', {
-            senderId: socket.id,
-            message: message
+            turnIndex: 0
         });
+
+        socket.join(gameId); // Join the Socket.IO room
+        socket.playerGameId = gameId; // Link this socket to the game ID
+        console.log(`Player ${socket.id} created and joined game: ${gameId}`);
+        socket.emit('gameCreated', gameId); // Confirm creation to the client
+        emitGameState(gameId); // Emit initial state for the new game
     });
 
-    // Handle game reset request (now per gameId)
-    socket.on('resetGame', () => {
-        const game = games[playerGameId];
+    // Handle player joining a game
+    socket.on('joinGame', (gameId) => {
+        // Basic validation
+        if (!gameId) {
+            return socket.emit('gameError', 'Invalid Game ID provided.');
+        }
+
+        let game = games.get(gameId);
+
+        // Check if game exists
         if (!game) {
-            socket.emit('error', 'You are not in a game.');
-            return;
+            console.log(`Game ${gameId} not found. Player ${socket.id} attempted to join.`);
+            return socket.emit('gameError', 'Game not found. Please check the ID or create a new game.');
         }
+
+        // NEW LOGIC: Check if the game room is full
+        if (game.players.length >= 2) {
+            console.log(`Game ${gameId} is full. Player ${socket.id} attempted to join.`);
+            return socket.emit('gameError', 'Game room is full. Please try another Game ID or create a new game.');
+        }
+
+        // Check if the player is already in this game
+        if (game.players.some(p => p.id === socket.id)) {
+            console.log(`Player ${socket.id} already in game ${gameId}.`);
+            // Just send a success message to the client as they are already in.
+            socket.join(gameId); // Ensure they are formally in the room
+            socket.playerGameId = gameId; // Link socket to game ID
+            return socket.emit('gameJoined', gameId);
+        }
+
+        // Add player to the game
+        game.players.push({ id: socket.id, socket: socket });
+        socket.join(gameId); // Join the Socket.IO room
+        socket.playerGameId = gameId; // Link this socket to the game ID
+        console.log(`Player ${socket.id} joined game ${gameId}. Current players: ${game.players.map(p => p.id).join(', ')}`);
+
+        socket.emit('gameJoined', gameId); // Confirm to the joining player
+
+        // Emit updated game state to all players in the room
+        emitGameState(gameId);
+    });
+
+    // Handle game start request
+    socket.on('startGame', () => {
+        const gameId = socket.playerGameId;
+        const game = games.get(gameId);
+
+        if (!game) {
+            return socket.emit('gameError', 'You are not in an active game.');
+        }
+
         if (game.gameStarted) {
-            console.log(`[Game ${playerGameId}] Player ${socket.id} requested game reset.`);
-            resetGame(playerGameId);
-        } else {
-            socket.emit('error', 'No active game to reset.');
+            return socket.emit('gameError', 'Game has already started.');
         }
+
+        if (game.players.length < 2) {
+            return socket.emit('gameError', 'Need at least 2 players to start the game.');
+        }
+
+        game.gameStarted = true;
+        game.currentTurnPlayerId = game.players[game.turnIndex].id; // Assign first turn
+        console.log(`Game ${gameId} started! First turn: ${game.currentTurnPlayerId}`);
+        emitGameState(gameId); // Update clients
+    });
+
+    // Handle a player marking a number
+    socket.on('markNumber', (num) => {
+        const gameId = socket.playerGameId;
+        const game = games.get(gameId);
+
+        if (!game) {
+            return socket.emit('gameError', 'You are not in an active game.');
+        }
+
+        if (!game.gameStarted) {
+            return socket.emit('gameError', 'Game has not started yet.');
+        }
+
+        if (socket.id !== game.currentTurnPlayerId) {
+            return socket.emit('gameError', 'It is not your turn.');
+        }
+
+        if (game.markedNumbers.includes(num)) {
+            return socket.emit('gameError', 'Number already called.');
+        }
+
+        game.markedNumbers.push(num);
+        console.log(`Player ${socket.id} marked number ${num} in game ${gameId}.`);
+        io.to(gameId).emit('numberMarked', num); // Broadcast to all in the room
+        advanceTurn(gameId); // Move to next player's turn
+    });
+
+    // Handle a player declaring Bingo
+    socket.on('declareWin', () => {
+        const gameId = socket.playerGameId;
+        const game = games.get(gameId);
+
+        if (!game) {
+            return socket.emit('gameError', 'You are not in an active game.');
+        }
+
+        if (!game.gameStarted) {
+            return socket.emit('gameError', 'Game has not started yet.');
+        }
+
+        // Logic to verify win should ideally be here or a more robust check on client side
+        // For simplicity, we assume the client's declareWin is valid for now.
+        game.gameStarted = false; // End the game
+        console.log(`Player ${socket.id} declared win in game ${gameId}!`);
+        io.to(gameId).emit('playerDeclaredWin', socket.id); // Broadcast winner to all in the room
+        emitGameState(gameId); // Update state to reflect game ended
+    });
+
+    // Handle chat messages
+    socket.on('sendMessage', (message) => {
+        const gameId = socket.playerGameId;
+        if (gameId) {
+            console.log(`Player ${socket.id} (Game ${gameId}): ${message}`);
+            io.to(gameId).emit('message', {
+                senderId: socket.id,
+                message: message
+            });
+        } else {
+            socket.emit('gameError', 'You must be in a game to send messages.');
+        }
+    });
+
+    // Handle game reset request
+    socket.on('resetGame', () => {
+        const gameId = socket.playerGameId;
+        const game = games.get(gameId);
+
+        if (!game) {
+            return socket.emit('gameError', 'You are not in an active game.');
+        }
+
+        console.log(`Player ${socket.id} requested game reset for game ${gameId}.`);
+        resetGame(gameId);
     });
 
     // Handle player disconnection
     socket.on('disconnect', () => {
         console.log(`Player disconnected: ${socket.id}`);
-        if (playerGameId) {
-            removePlayerFromGame(playerGameId, socket.id);
+        const gameId = socket.playerGameId;
+
+        if (gameId && games.has(gameId)) {
+            const game = games.get(gameId);
+            game.players = game.players.filter(p => p.id !== socket.id); // Remove disconnected player
+
+            console.log(`Player ${socket.id} left game ${gameId}. Remaining players: ${game.players.length}`);
+
+            if (game.players.length === 0) {
+                // If no players left, delete the game room
+                games.delete(gameId);
+                console.log(`Game ${gameId} deleted as no players remain.`);
+            } else {
+                // If the disconnected player was supposed to be the current turn holder, advance turn
+                if (game.gameStarted && game.currentTurnPlayerId === socket.id) {
+                    if (game.players.length > 0) {
+                        // Re-calculate turnIndex to avoid out-of-bounds if the current player was removed
+                        const currentTurnPlayerIndex = game.players.findIndex(p => p.id === game.currentTurnPlayerId);
+                        game.turnIndex = (currentTurnPlayerIndex === -1) ? 0 : currentTurnPlayerIndex; // Reset to 0 or current turn if still valid
+                        advanceTurn(gameId);
+                    } else {
+                        // This case should be caught by game.players.length === 0, but as a fallback
+                        resetGame(gameId);
+                    }
+                }
+
+                // If game was started and now less than 2 players, reset game
+                if (game.gameStarted && game.players.length < 2) {
+                    console.log(`Game ${gameId}: Not enough players (${game.players.length}). Game ended.`);
+                    resetGame(gameId); // This will also emit gameState
+                } else {
+                    emitGameState(gameId); // Update game state for remaining players
+                }
+            }
         }
     });
 });

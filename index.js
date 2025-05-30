@@ -60,6 +60,7 @@ function emitGameState(gameId) {
         currentTurnPlayerId: gameRoom.currentTurnPlayerId,
         markedNumbers: gameRoom.markedNumbers,
         winnerId: gameRoom.winnerId || null, // Add winnerId to state
+        draw: gameRoom.draw || false, // NEW: Add draw state to broadcast
         pendingNewMatchRequest: gameRoom.pendingNewMatchRequest || null // Include pending request state
     });
 }
@@ -96,6 +97,7 @@ function resetGameRound(gameId) {
     gameRoom.markedNumbers = [];
     gameRoom.turnIndex = 0;
     gameRoom.winnerId = null; // Clear winner
+    gameRoom.draw = false; // NEW: Clear draw state
     gameRoom.pendingNewMatchRequest = null; // Clear any pending requests
 
     // Re-assign player numbers in case players left/joined
@@ -130,6 +132,7 @@ io.on('connection', (socket) => {
             markedNumbers: [],
             turnIndex: 0,
             winnerId: null,
+            draw: false, // NEW: Initialize draw state
             pendingNewMatchRequest: null // Initialize pending request state
         };
         gameRooms.set(gameId, newGameRoom);
@@ -211,6 +214,7 @@ io.on('connection', (socket) => {
 
         gameRoom.gameStarted = true;
         gameRoom.winnerId = null; // Clear winner for new round
+        gameRoom.draw = false; // NEW: Clear draw state for new round
         gameRoom.pendingNewMatchRequest = null; // Clear any pending requests
         // Randomly decide who starts first
         gameRoom.turnIndex = Math.floor(Math.random() * gameRoom.players.length);
@@ -242,8 +246,9 @@ io.on('connection', (socket) => {
         io.to(gameId).emit('numberMarked', number); // Emit to all clients in the room
 
         // Check for win condition after marking
-        if (gameRoom.winnerId) {
-             console.log(`Game ${gameId} already has a winner (${gameRoom.winnerId}). No more turns.`);
+        // If there's already a winner or it's a draw, don't advance turn
+        if (gameRoom.winnerId || gameRoom.draw) { // NEW: Check for draw as well
+             console.log(`Game ${gameId} already has a winner (${gameRoom.winnerId}) or is a draw. No more turns.`);
         } else {
              advanceTurn(gameRoom); // Advance turn after marking
         }
@@ -254,8 +259,22 @@ io.on('connection', (socket) => {
         const gameId = playerCurrentGameId;
         const gameRoom = gameRooms.get(gameId);
 
-        if (!gameRoom || !gameRoom.gameStarted || gameRoom.winnerId) {
-            socket.emit('gameError', 'Cannot declare win. Game not active or already won.');
+        if (!gameRoom || gameRoom.gameStarted === false || gameRoom.draw === true) { // NEW: Check if game is already not started or is a draw
+            // This means another player already won or declared a win on the same turn.
+            // Or the game state is already in a draw.
+            if (gameRoom && gameRoom.winnerId && gameRoom.winnerId !== socket.id) {
+                // If there's already a winner and it's not THIS player, it's a simultaneous win (draw)
+                gameRoom.draw = true; // Set draw state
+                gameRoom.gameStarted = false; // Ensure game is marked as not started
+                gameRoom.currentTurnPlayerId = null; // No one's turn in a draw
+                console.log(`Room ${gameId}: Simultaneous win detected! Player ${socket.id} also declared win.`);
+                const lastMarkedNumber = gameRoom.markedNumbers[gameRoom.markedNumbers.length - 1]; // Get the number that caused the draw
+                io.to(gameId).emit('gameDraw', { number: lastMarkedNumber }); // NEW: Emit draw event
+                emitGameState(gameId); // Update state to reflect draw
+            } else {
+                // This is a genuine error, e.g., trying to declare win when game hasn't started
+                socket.emit('gameError', 'Cannot declare win. Game not active or already won.');
+            }
             return;
         }
 
@@ -396,7 +415,7 @@ io.on('connection', (socket) => {
         resetGameRound(gameId);
     });
 
-    // NEW: Handle player explicitly leaving the game room
+    // Handle player explicitly leaving the game room
     socket.on('leaveGame', () => {
         console.log(`Player ${socket.id} explicitly leaving game.`);
         const gameId = playerCurrentGameId;

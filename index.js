@@ -6,14 +6,11 @@ const socketIO = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// IMPORTANT: Set your frontend's actual URL here.
-// If running locally with Live Server, it's often http://127.0.0.1:5500 or http://localhost:5500
-// If hosted on Render, it would be https://your-frontend-app-name.onrender.com
-const FRONTEND_URL = 'https://bingo-multiplayer.pages.dev'; // <--- !!! CHANGE THIS !!!
+const FRONTEND_URL = 'https://bingo-multiplayer.pages.dev'; // <--- !!! ENSURE THIS MATCHES YOUR DEPLOYED FRONTEND URL !!!
 
 const io = socketIO(server, {
     cors: {
-        origin:FRONTEND_URL,
+        origin: FRONTEND_URL,
         methods: ['GET', 'POST']
     }
 });
@@ -33,9 +30,12 @@ const games = new Map(); // gameId -> { players: [], gameStarted: false, current
 function generateGameId() {
     const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let result = '';
-    for (let i = 0; i < 6; i++) {
-        result += characters.charAt(Math.floor(Math.random() * characters.length));
-    }
+    do {
+        result = '';
+        for (let i = 0; i < 6; i++) {
+            result += characters.charAt(Math.floor(Math.random() * characters.length));
+        }
+    } while (games.has(result)); // Ensure ID is unique
     return result;
 }
 
@@ -53,14 +53,15 @@ function emitGameState(gameId) {
 
     const state = {
         gameId: gameId,
-        players: game.players.map(p => ({ id: p.id })), // Send only IDs to clients
+        // Send player data including id, username, and assigned playerNumber
+        players: game.players.map(p => ({ id: p.id, username: p.username, playerNumber: p.playerNumber })),
         gameStarted: game.gameStarted,
         currentTurnPlayerId: game.currentTurnPlayerId,
         markedNumbers: game.markedNumbers,
         turnIndex: game.turnIndex
     };
     io.to(gameId).emit('gameState', state);
-    console.log(`Emitted gameState for game ${gameId}. Started: ${game.gameStarted}, Turn: ${game.currentTurnPlayerId ? game.currentTurnPlayerId.substring(0,5) : 'N/A'}`);
+    console.log(`Emitted gameState for game ${gameId}. Started: ${game.gameStarted}, Turn: ${game.currentTurnPlayerId ? game.players.find(p => p.id === game.currentTurnPlayerId)?.username || game.currentTurnPlayerId.substring(0,5) : 'N/A'}`);
 }
 
 /**
@@ -75,7 +76,7 @@ function advanceTurn(gameId) {
     }
     game.turnIndex = (game.turnIndex + 1) % game.players.length;
     game.currentTurnPlayerId = game.players[game.turnIndex].id;
-    console.log(`Game ${gameId}: Turn advanced to ${game.currentTurnPlayerId}`);
+    console.log(`Game ${gameId}: Turn advanced to ${game.players[game.turnIndex].username || game.currentTurnPlayerId}`);
     emitGameState(gameId); // Update clients
 }
 
@@ -104,70 +105,74 @@ function resetGame(gameId) {
 io.on('connection', (socket) => {
     console.log(`A player connected: ${socket.id}`);
 
-    // Store the gameId for this socket directly on the socket object
+    // Store the gameId and username for this socket directly on the socket object
     socket.playerGameId = null;
+    socket.username = `Player ${socket.id.substring(0, 4)}`; // Default username
 
     // Handle creating a new game
-    socket.on('createGame', () => {
-        let gameId;
-        do {
-            gameId = generateGameId();
-        } while (games.has(gameId)); // Ensure ID is unique
+    socket.on('createGame', (username) => {
+        if (socket.playerGameId) {
+            socket.emit('gameError', 'You are already in a game. Please leave current game first.');
+            return;
+        }
+        socket.username = username || `Player ${socket.id.substring(0, 4)}`; // Set username from client or default
 
+        const gameId = generateGameId();
         games.set(gameId, {
-            players: [{ id: socket.id, socket: socket }],
+            players: [], // Initialize as empty, then add player
             gameStarted: false,
             currentTurnPlayerId: null,
             markedNumbers: [],
             turnIndex: 0
         });
 
+        const game = games.get(gameId);
+        // Add player to game with playerNumber 1
+        game.players.push({ id: socket.id, socket: socket, username: socket.username, playerNumber: 1 });
+
         socket.join(gameId); // Join the Socket.IO room
         socket.playerGameId = gameId; // Link this socket to the game ID
-        console.log(`Player ${socket.id} created and joined game: ${gameId}`);
+        console.log(`Player ${socket.username} (${socket.id}) created and joined game: ${gameId}`);
         socket.emit('gameCreated', gameId); // Confirm creation to the client
         emitGameState(gameId); // Emit initial state for the new game
     });
 
     // Handle player joining a game
-    socket.on('joinGame', (gameId) => {
+    socket.on('joinGame', (gameId, username) => {
         // Basic validation
         if (!gameId) {
             return socket.emit('gameError', 'Invalid Game ID provided.');
         }
+        if (socket.playerGameId) {
+            return socket.emit('gameError', 'You are already in a game. Please leave current game first.');
+        }
+        socket.username = username || `Player ${socket.id.substring(0, 4)}`; // Set username from client or default
 
         let game = games.get(gameId);
 
         // Check if game exists
         if (!game) {
-            console.log(`Game ${gameId} not found. Player ${socket.id} attempted to join.`);
+            console.log(`Game ${gameId} not found. Player ${socket.username} (${socket.id}) attempted to join.`);
             return socket.emit('gameError', 'Game not found. Please check the ID or create a new game.');
         }
 
         // Check if the game room is full
         if (game.players.length >= 2) {
-            console.log(`Game ${gameId} is full. Player ${socket.id} attempted to join.`);
+            console.log(`Game ${gameId} is full. Player ${socket.username} (${socket.id}) attempted to join.`);
             return socket.emit('gameError', 'Game room is full. Please try another Game ID or create a new game.');
         }
 
-        // Check if the player is already in this game
-        if (game.players.some(p => p.id === socket.id)) {
-            console.log(`Player ${socket.id} already in game ${gameId}.`);
-            // Just send a success message to the client as they are already in.
-            socket.join(gameId); // Ensure they are formally in the room
-            socket.playerGameId = gameId; // Link socket to game ID
-            return socket.emit('gameJoined', gameId);
-        }
-
-        // Add player to the game
-        game.players.push({ id: socket.id, socket: socket });
+        // Add player to the game with playerNumber 2
+        game.players.push({ id: socket.id, socket: socket, username: socket.username, playerNumber: game.players.length + 1 });
         socket.join(gameId); // Join the Socket.IO room
         socket.playerGameId = gameId; // Link this socket to the game ID
-        console.log(`Player ${socket.id} joined game ${gameId}. Current players: ${game.players.map(p => p.id).join(', ')}`);
+        console.log(`Player ${socket.username} (${socket.id}) joined game ${gameId}. Current players: ${game.players.map(p => p.username).join(', ')}`);
 
         socket.emit('gameJoined', gameId); // Confirm to the joining player
+
         // NEW: Notify other players in the room that a user has joined
-        socket.to(gameId).emit('userJoined', socket.id);
+        // Send the joining player's username
+        socket.to(gameId).emit('userJoined', socket.username);
 
         // Emit updated game state to all players in the room
         emitGameState(gameId);
@@ -192,7 +197,7 @@ io.on('connection', (socket) => {
 
         game.gameStarted = true;
         game.currentTurnPlayerId = game.players[game.turnIndex].id; // Assign first turn
-        console.log(`Game ${gameId} started! First turn: ${game.currentTurnPlayerId}`);
+        console.log(`Game ${gameId} started! First turn: ${game.players[game.turnIndex].username}`);
         emitGameState(gameId); // Update clients
     });
 
@@ -210,17 +215,15 @@ io.on('connection', (socket) => {
         }
 
         if (socket.id !== game.currentTurnPlayerId) {
-            // This is one of the messages that will now trigger the temporary notification
             return socket.emit('gameError', 'It is not your turn.');
         }
 
         if (game.markedNumbers.includes(num)) {
-            // This is one of the messages that will now trigger the temporary notification
             return socket.emit('gameError', 'Number already called.');
         }
 
         game.markedNumbers.push(num);
-        console.log(`Player ${socket.id} marked number ${num} in game ${gameId}.`);
+        console.log(`Player ${socket.username} marked number ${num} in game ${gameId}.`);
         io.to(gameId).emit('numberMarked', num); // Broadcast to all in the room
         advanceTurn(gameId); // Move to next player's turn
     });
@@ -239,8 +242,8 @@ io.on('connection', (socket) => {
         }
 
         game.gameStarted = false; // End the game
-        console.log(`Player ${socket.id} declared win in game ${gameId}!`);
-        io.to(gameId).emit('playerDeclaredWin', socket.id); // Broadcast winner to all in the room
+        console.log(`Player ${socket.username} declared win in game ${gameId}!`);
+        io.to(gameId).emit('playerDeclaredWin', socket.username); // Broadcast winner's username
         emitGameState(gameId); // Update state to reflect game ended
     });
 
@@ -248,9 +251,9 @@ io.on('connection', (socket) => {
     socket.on('sendMessage', (message) => {
         const gameId = socket.playerGameId;
         if (gameId) {
-            console.log(`Player ${socket.id} (Game ${gameId}): ${message}`);
+            console.log(`Player ${socket.username} (Game ${gameId}): ${message}`);
             io.to(gameId).emit('message', {
-                senderId: socket.id,
+                senderId: socket.username, // Send username as sender
                 message: message
             });
         } else {
@@ -267,24 +270,25 @@ io.on('connection', (socket) => {
             return socket.emit('gameError', 'You are not in an active game.');
         }
 
-        console.log(`Player ${socket.id} requested game reset for game ${gameId}.`);
+        console.log(`Player ${socket.username} requested game reset for game ${gameId}.`);
         resetGame(gameId);
     });
 
     // Handle player disconnection
     socket.on('disconnect', () => {
-        console.log(`Player disconnected: ${socket.id}`);
+        console.log(`Player disconnected: ${socket.id} (Username: ${socket.username})`);
         const gameId = socket.playerGameId;
 
         if (gameId && games.has(gameId)) {
             const game = games.get(gameId);
 
             // NEW: Notify other players in the room that a user has left BEFORE removing them from the list
-            socket.to(gameId).emit('userLeft', socket.id); // Emit to others in the room (not self)
+            // Send the leaving player's username
+            socket.to(gameId).emit('userLeft', socket.username);
 
             game.players = game.players.filter(p => p.id !== socket.id); // Remove disconnected player
 
-            console.log(`Player ${socket.id} left game ${gameId}. Remaining players: ${game.players.length}`);
+            console.log(`Player ${socket.username} left game ${gameId}. Remaining players: ${game.players.length}`);
 
             if (game.players.length === 0) {
                 // If no players left, delete the game room

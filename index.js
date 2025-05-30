@@ -144,7 +144,7 @@ io.on('connection', (socket) => {
             return socket.emit('gameError', 'Game not found. Please check the ID or create a new game.');
         }
 
-        // NEW LOGIC: Check if the game room is full
+        // Check if the game room is full
         if (game.players.length >= 2) {
             console.log(`Game ${gameId} is full. Player ${socket.id} attempted to join.`);
             return socket.emit('gameError', 'Game room is full. Please try another Game ID or create a new game.');
@@ -166,6 +166,8 @@ io.on('connection', (socket) => {
         console.log(`Player ${socket.id} joined game ${gameId}. Current players: ${game.players.map(p => p.id).join(', ')}`);
 
         socket.emit('gameJoined', gameId); // Confirm to the joining player
+        // NEW: Notify other players in the room that a user has joined
+        socket.to(gameId).emit('userJoined', socket.id);
 
         // Emit updated game state to all players in the room
         emitGameState(gameId);
@@ -208,10 +210,12 @@ io.on('connection', (socket) => {
         }
 
         if (socket.id !== game.currentTurnPlayerId) {
+            // This is one of the messages that will now trigger the temporary notification
             return socket.emit('gameError', 'It is not your turn.');
         }
 
         if (game.markedNumbers.includes(num)) {
+            // This is one of the messages that will now trigger the temporary notification
             return socket.emit('gameError', 'Number already called.');
         }
 
@@ -234,8 +238,6 @@ io.on('connection', (socket) => {
             return socket.emit('gameError', 'Game has not started yet.');
         }
 
-        // Logic to verify win should ideally be here or a more robust check on client side
-        // For simplicity, we assume the client's declareWin is valid for now.
         game.gameStarted = false; // End the game
         console.log(`Player ${socket.id} declared win in game ${gameId}!`);
         io.to(gameId).emit('playerDeclaredWin', socket.id); // Broadcast winner to all in the room
@@ -276,6 +278,10 @@ io.on('connection', (socket) => {
 
         if (gameId && games.has(gameId)) {
             const game = games.get(gameId);
+
+            // NEW: Notify other players in the room that a user has left BEFORE removing them from the list
+            socket.to(gameId).emit('userLeft', socket.id); // Emit to others in the room (not self)
+
             game.players = game.players.filter(p => p.id !== socket.id); // Remove disconnected player
 
             console.log(`Player ${socket.id} left game ${gameId}. Remaining players: ${game.players.length}`);

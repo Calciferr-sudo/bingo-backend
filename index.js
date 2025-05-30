@@ -265,7 +265,8 @@ io.on('connection', (socket) => {
         const winner = gameRoom.players.find(p => p.id === socket.id);
         const winningUsername = winner ? winner.username : 'Unknown Player';
 
-        io.to(gameId).emit('playerDeclaredWin', winningUsername);
+        // *** CHANGE HERE ***
+        io.to(gameId).emit('playerDeclaredWin', { winnerId: socket.id, winningUsername: winningUsername });
         emitGameState(gameId); // Update state to reflect winner and game ended
     });
 

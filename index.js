@@ -60,7 +60,7 @@ function emitGameState(gameId) {
         currentTurnPlayerId: gameRoom.currentTurnPlayerId,
         markedNumbers: gameRoom.markedNumbers,
         winnerId: gameRoom.winnerId || null, // Add winnerId to state
-        pendingNewMatchRequest: gameRoom.pendingNewMatchRequest || null // NEW: Include pending request state
+        pendingNewMatchRequest: gameRoom.pendingNewMatchRequest || null // Include pending request state
     });
 }
 
@@ -96,7 +96,7 @@ function resetGameRound(gameId) {
     gameRoom.markedNumbers = [];
     gameRoom.turnIndex = 0;
     gameRoom.winnerId = null; // Clear winner
-    gameRoom.pendingNewMatchRequest = null; // NEW: Clear any pending requests
+    gameRoom.pendingNewMatchRequest = null; // Clear any pending requests
 
     // Re-assign player numbers in case players left/joined
     gameRoom.players.forEach((p, idx) => {
@@ -130,7 +130,7 @@ io.on('connection', (socket) => {
             markedNumbers: [],
             turnIndex: 0,
             winnerId: null,
-            pendingNewMatchRequest: null // NEW: Initialize pending request state
+            pendingNewMatchRequest: null // Initialize pending request state
         };
         gameRooms.set(gameId, newGameRoom);
 
@@ -273,7 +273,7 @@ io.on('connection', (socket) => {
         emitGameState(gameId); // Update state to reflect winner and game ended
     });
 
-    // NEW: Handle request for a new match
+    // Handle request for a new match
     socket.on('requestNewMatch', () => {
         const gameId = playerCurrentGameId;
         const gameRoom = gameRooms.get(gameId);
@@ -311,7 +311,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    // NEW: Handle accepting a new match
+    // Handle accepting a new match
     socket.on('acceptNewMatch', () => {
         const gameId = playerCurrentGameId;
         const gameRoom = gameRooms.get(gameId);
@@ -327,7 +327,7 @@ io.on('connection', (socket) => {
         emitGameState(gameId); // Ensure state is broadcast after reset
     });
 
-    // NEW: Handle declining a new match
+    // Handle declining a new match
     socket.on('declineNewMatch', () => {
         const gameId = playerCurrentGameId;
         const gameRoom = gameRooms.get(gameId);
@@ -396,11 +396,60 @@ io.on('connection', (socket) => {
         resetGameRound(gameId);
     });
 
+    // NEW: Handle player explicitly leaving the game room
+    socket.on('leaveGame', () => {
+        console.log(`Player ${socket.id} explicitly leaving game.`);
+        const gameId = playerCurrentGameId;
 
-    // Handle player disconnection
+        if (gameId && gameRooms.has(gameId)) {
+            const gameRoom = gameRooms.get(gameId);
+            const leavingPlayer = gameRoom.players.find(p => p.id === socket.id);
+            const leavingUsername = leavingPlayer ? leavingPlayer.username : 'Unknown Player';
+
+            // Remove player from the room's player list
+            gameRoom.players = gameRoom.players.filter(p => p.id !== socket.id);
+            console.log(`Player ${leavingUsername} (${socket.id}) left room ${gameId}.`);
+            io.to(gameId).emit('userLeft', leavingUsername); // Notify others in the room
+
+            // Leave the Socket.IO room
+            socket.leave(gameId);
+            playerCurrentGameId = null; // Clear the game ID on the socket
+
+            // If the leaving player was the current turn holder, advance turn
+            if (gameRoom.currentTurnPlayerId === socket.id && gameRoom.gameStarted) {
+                if (gameRoom.players.length > 0) {
+                    // Re-calculate turnIndex to avoid out-of-bounds if the current player was removed
+                    const currentTurnPlayerIndex = gameRoom.players.findIndex(p => p.id === gameRoom.currentTurnPlayerId);
+                    gameRoom.turnIndex = (currentTurnPlayerIndex === -1) ? 0 : currentTurnPlayerIndex; // Reset to 0 or current turn if still valid
+                    advanceTurn(gameRoom);
+                } else {
+                    // No players left, clean up the game room
+                    console.log(`Last player left from room ${gameId}. Deleting room.`);
+                    gameRooms.delete(gameId);
+                }
+            }
+
+            // If game was started and now less than 2 players, reset game round
+            if (gameRoom.gameStarted && gameRoom.players.length < 2) {
+                console.log(`Not enough players in room ${gameId}. Game round ended.`);
+                resetGameRound(gameId);
+            }
+
+            // If the room still exists (e.g., one player left), emit updated state
+            if (gameRooms.has(gameId)) {
+                emitGameState(gameId);
+            } else {
+                // If the room was deleted, ensure no state is emitted for it.
+            }
+        }
+    });
+
+
+    // Handle player disconnection (browser tab close, network issue)
     socket.on('disconnect', () => {
         console.log(`Player disconnected: ${socket.id}`);
 
+        // Use playerCurrentGameId to find the room they were in
         if (playerCurrentGameId) {
             const gameId = playerCurrentGameId;
             const gameRoom = gameRooms.get(gameId);
@@ -411,7 +460,7 @@ io.on('connection', (socket) => {
 
                 // Remove player from the room's player list
                 gameRoom.players = gameRoom.players.filter(p => p.id !== socket.id);
-                console.log(`Player ${disconnectedUsername} (${socket.id}) left room ${gameId}.`);
+                console.log(`Player ${disconnectedUsername} (${socket.id}) disconnected from room ${gameId}.`);
                 io.to(gameId).emit('userLeft', disconnectedUsername); // Notify others in the room
 
                 // If the disconnected player was the current turn holder, advance turn

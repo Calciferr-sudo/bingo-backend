@@ -369,8 +369,11 @@ io.on('connection', (socket) => {
         };
         console.log(`Room ${gameId}: Player ${requester.username} requested a new match.`);
 
-        // Emit to all players in the room, including the requester
-        io.to(gameId).emit('newMatchRequested', requester.username);
+        // Emit to all players in the room, including the requester, WITH requesterId
+        io.to(gameId).emit('newMatchRequested', {
+            requesterId: requester.id,
+            requesterUsername: requester.username
+        });
         emitGameState(gameId); // Update state with pending request
     });
 
@@ -392,7 +395,6 @@ io.on('connection', (socket) => {
 
         console.log(`Room ${gameId}: Player ${socket.id} accepted new match request.`);
         gameRoom.pendingNewMatchRequest = null; // Clear pending request
-        resetGameRound(gameId); // Reset the game for a new round
         io.to(gameId).emit('newMatchAccepted'); // Notify clients that it was accepted
     });
 

@@ -202,14 +202,16 @@ io.on('connection', (socket) => {
 
         const gameRoom = gameRooms.get(gameId);
         if (gameRoom) {
+            // NEW: Get leaving player info BEFORE filtering
+            const leavingPlayer = gameRoom.players.find(p => p.id === socket.id);
+            const leavingUsername = (leavingPlayer && leavingPlayer.username) || 'A player'; 
+
             // Remove player from the game room
             gameRoom.players = gameRoom.players.filter(p => p.id !== socket.id);
             console.log(`Player ${socket.id} left room ${gameId}. Remaining players: ${gameRoom.players.length}`);
 
             // Notify other players
-            const leavingPlayer = gameRoom.players.find(p => p.id === socket.id); // This will be undefined after filter
-            const leavingUsername = (leavingPlayer && leavingPlayer.username) || 'A player'; // Get name before it's gone
-            io.to(gameId).emit('userLeft', leavingUsername);
+            io.to(gameId).emit('userLeft', leavingUsername); // Emits the username
 
             // If game was started and now less than 2 players, reset game round
             if (gameRoom.gameStarted && gameRoom.players.length < 2) {
@@ -445,14 +447,15 @@ io.on('connection', (socket) => {
         const gameRoom = gameRooms.get(gameId);
 
         if (gameRoom) {
-            const leavingPlayer = gameRoom.players.find(p => p.id === socket.id);
-            const leavingUsername = (leavingPlayer && leavingPlayer.username) || 'A player';
+            // NEW: Get disconnected player info BEFORE filtering
+            const disconnectedPlayer = gameRoom.players.find(p => p.id === socket.id);
+            const disconnectedUsername = (disconnectedPlayer && disconnectedPlayer.username) || 'A player';
 
             gameRoom.players = gameRoom.players.filter(p => p.id !== socket.id);
-            console.log(`Player ${leavingUsername} (${socket.id}) disconnected from room ${gameId}. Remaining players: ${gameRoom.players.length}`);
+            console.log(`Player ${disconnectedUsername} (${socket.id}) disconnected from room ${gameId}. Remaining players: ${gameRoom.players.length}`);
 
             // Notify remaining players about disconnection
-            io.to(gameId).emit('userLeft', leavingUsername);
+            io.to(gameId).emit('userLeft', disconnectedUsername);
 
             // If it was the disconnected player's turn, advance turn
             if (gameRoom.currentTurnPlayerId === socket.id && gameRoom.gameStarted) {

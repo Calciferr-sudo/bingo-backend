@@ -395,7 +395,9 @@ io.on('connection', (socket) => {
 
         console.log(`Room ${gameId}: Player ${socket.id} accepted new match request.`);
         gameRoom.pendingNewMatchRequest = null; // Clear pending request
-        io.to(gameId).emit('newMatchAccepted'); // Notify clients that it was accepted
+        resetGameRound(gameId); // Reset the game for a new round
+        // The resetGameRound function already emits 'gameReset' and 'gameState'
+        // io.to(gameId).emit('newMatchAccepted'); // No longer needed here, handled by gameReset
     });
 
     // Decline New Match

@@ -1,4 +1,3 @@
-// index.js
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
@@ -18,7 +17,8 @@ const io = socketIO(server, {
 
 const PORT = process.env.PORT || 3000;
 
-// Add a simple /ping endpoint for keep-alive
+// This is the /ping endpoint that the keep-alive service needs to hit.
+// It responds with a 200 OK and "pong".
 app.get('/ping', (req, res) => {
     console.log('Received /ping request.'); // Log for debugging
     res.status(200).send('pong');
@@ -440,6 +440,34 @@ io.on('connection', (socket) => {
     });
 
 
+    // NEW: Listen for incoming emotes
+    socket.on('sendEmote', (emote) => {
+        const gameId = playerCurrentGameId;
+        const gameRoom = gameRooms.get(gameId);
+
+        if (!gameRoom) {
+            socket.emit('gameError', 'Not in a game to send emotes.');
+            return;
+        }
+
+        const sender = gameRoom.players.find(p => p.id === socket.id);
+        const senderUsername = sender ? sender.username : `Player-${socket.id.substring(0, 4)}`;
+
+        // Optional: Basic validation for allowed emotes
+        // Ensure this list matches the `data-emote` attributes in your index.html exactly
+        const allowedEmotes = ['👍 Nice!', '👎 Oops!', '😂 Haha!', '😡 Argh!', '✨ Bingo!']; 
+        if (!allowedEmotes.includes(emote)) {
+            console.warn(`Player ${senderUsername} tried to send invalid emote: ${emote}`);
+            socket.emit('gameError', 'Invalid emote.');
+            return;
+        }
+
+        console.log(`Room ${gameId} - Emote: [${senderUsername}] sent ${emote}`);
+        // Broadcast the emote to everyone in the room (including sender, who can then display it)
+        io.to(gameId).emit('emote', { senderUsername: senderUsername, emote: emote });
+    });
+
+
     // --- Disconnection Handling ---
     socket.on('disconnect', () => {
         console.log('User disconnected:', socket.id);
@@ -490,28 +518,33 @@ server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 
     // --- NEW: Self-ping interval for backend to stay awake ---
-    const BACKEND_URL = `http://localhost:${PORT}`; // Default for local. For Render, use the deployed URL.
-    // For Render, you'll need the actual deployed URL. Let's assume you've set it as an environment variable
-    // or you can hardcode it here, replacing `http://localhost:${PORT}`
-    const DEPLOYED_BACKEND_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`; 
-    // If RENDER_EXTERNAL_URL is not set, or you're running locally, it defaults.
-    // IMPORTANT: Replace the above line if you know your exact deployed URL and want to hardcode it:
-    // const DEPLOYED_BACKEND_URL = 'https://your-bingo-backend.onrender.com'; 
+    // This URL needs to be the publicly accessible URL of your Render backend service.
+    // Render typically sets this as an environment variable.
+    const DEPLOYED_BACKEND_URL = process.env.RENDER_EXTERNAL_URL; 
 
-    const PING_INTERVAL_MS = 14 * 60 * 1000; // 14 minutes (less than Render's 15-min dormancy)
+    // Fallback for local development or if RENDER_EXTERNAL_URL isn't available
+    const BACKEND_PING_URL = DEPLOYED_BACKEND_URL ? `${DEPLOYED_BACKEND_URL}/ping` : `http://localhost:${PORT}/ping`;
+    
+    // Ping interval should be less than Render's dormancy period (e.g., 15 minutes)
+    const PING_INTERVAL_MS = 14 * 60 * 1000; // 14 minutes
 
-    setInterval(() => {
-        fetch(`${DEPLOYED_BACKEND_URL}/ping`)
-            .then(response => {
-                if (!response.ok) {
-                    console.warn(`Self-ping failed: ${response.status} ${response.statusText}`);
-                } else {
-                    console.log('Self-ping successful.');
-                }
-            })
-            .catch(error => {
-                console.error('Self-ping error:', error.message);
-            });
-    }, PING_INTERVAL_MS);
+    if (DEPLOYED_BACKEND_URL) { // Only start self-ping if deployed URL is known
+        setInterval(() => {
+            fetch(BACKEND_PING_URL)
+                .then(response => {
+                    if (!response.ok) {
+                        console.warn(`Self-ping failed: ${response.status} ${response.statusText}. URL: ${BACKEND_PING_URL}`);
+                    } else {
+                        console.log('Self-ping successful.');
+                    }
+                })
+                .catch(error => {
+                    console.error(`Self-ping error to ${BACKEND_PING_URL}:`, error.message);
+                });
+        }, PING_INTERVAL_MS);
+        console.log(`Backend self-ping configured to ${BACKEND_PING_URL} every ${PING_INTERVAL_MS / 1000 / 60} minutes.`);
+    } else {
+        console.warn('RENDER_EXTERNAL_URL not found. Self-ping will not be active in this environment. Ensure it is set on Render.');
+    }
     // --- END Self-ping ---
 });

@@ -488,4 +488,30 @@ io.on('connection', (socket) => {
 
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+
+    // --- NEW: Self-ping interval for backend to stay awake ---
+    const BACKEND_URL = `http://localhost:${PORT}`; // Default for local. For Render, use the deployed URL.
+    // For Render, you'll need the actual deployed URL. Let's assume you've set it as an environment variable
+    // or you can hardcode it here, replacing `http://localhost:${PORT}`
+    const DEPLOYED_BACKEND_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`; 
+    // If RENDER_EXTERNAL_URL is not set, or you're running locally, it defaults.
+    // IMPORTANT: Replace the above line if you know your exact deployed URL and want to hardcode it:
+    // const DEPLOYED_BACKEND_URL = 'https://your-bingo-backend.onrender.com'; 
+
+    const PING_INTERVAL_MS = 14 * 60 * 1000; // 14 minutes (less than Render's 15-min dormancy)
+
+    setInterval(() => {
+        fetch(`${DEPLOYED_BACKEND_URL}/ping`)
+            .then(response => {
+                if (!response.ok) {
+                    console.warn(`Self-ping failed: ${response.status} ${response.statusText}`);
+                } else {
+                    console.log('Self-ping successful.');
+                }
+            })
+            .catch(error => {
+                console.error('Self-ping error:', error.message);
+            });
+    }, PING_INTERVAL_MS);
+    // --- END Self-ping ---
 });

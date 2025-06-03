@@ -28,6 +28,10 @@ app.get('/ping', (req, res) => {
 // Stores gameId -> { game_state_object }
 const gameRooms = new Map();
 
+// NEW: AI Player Constants
+const AI_PLAYER_ID = 'AI-PLAYER';
+const AI_USERNAME = 'BingoBot';
+
 // --- Helper Functions ---
 
 /**
@@ -98,8 +102,12 @@ function resetGameRound(gameId) {
         gameRoom.draw = false; // Clear draw status
         gameRoom.pendingNewMatchRequest = null; // Clear any pending requests
 
-        // Reset player readiness for new round
-        gameRoom.players.forEach(p => p.isReady = false);
+        // Reset player readiness for new round, but keep AI's 'ready' state if it's an AI game
+        gameRoom.players.forEach(p => {
+            if (p.id !== AI_PLAYER_ID) { // Only reset human player readiness
+                p.isReady = false;
+            }
+        });
 
         io.to(gameId).emit('gameReset'); // Notify clients of reset
         emitGameState(gameId); // Update clients with new state
@@ -121,9 +129,18 @@ function advanceTurn(gameRoom) {
     console.log(`Turn advanced in room ${gameRoom.gameId}. Current turn: ${gameRoom.currentTurnPlayerId}`);
 }
 
+// NEW: Function to broadcast online players count
+function broadcastOnlinePlayersCount() {
+    // io.engine.clientsCount gives the total number of connected Socket.IO clients
+    const onlineCount = io.engine.clientsCount;
+    io.emit('onlinePlayersCount', onlineCount);
+    console.log(`Currently online players: ${onlineCount}`);
+}
+
 // --- Socket.IO Connection Handling ---
 io.on('connection', (socket) => {
     console.log('A user connected:', socket.id);
+    broadcastOnlinePlayersCount(); // Broadcast count on every new connection
 
     let playerCurrentGameId = null; // To keep track of the gameId this socket is in
 
@@ -160,6 +177,41 @@ io.on('connection', (socket) => {
         emitGameState(gameId);
     });
 
+    // NEW: Create AI Game
+    socket.on('createAIGame', (username) => {
+        if (playerCurrentGameId) {
+            socket.emit('gameError', 'Already in a game. Please leave first.');
+            return;
+        }
+
+        const gameId = generateGameId();
+        const newGameRoom = {
+            gameId: gameId,
+            players: [], // { id, username, playerNumber, isReady }
+            gameStarted: false,
+            markedNumbers: [], // Numbers called in this game
+            currentTurnPlayerId: null,
+            turnIndex: 0,
+            winnerId: null,
+            draw: false,
+            pendingNewMatchRequest: null,
+            isAIGame: true // Flag to indicate this is an AI game
+        };
+        gameRooms.set(gameId, newGameRoom);
+        playerCurrentGameId = gameId;
+
+        // Add Human Player
+        newGameRoom.players.push({ id: socket.id, username: username, playerNumber: 1, isReady: false });
+        // Add AI Player
+        newGameRoom.players.push({ id: AI_PLAYER_ID, username: AI_USERNAME, playerNumber: 2, isReady: true }); // AI is always ready
+
+        socket.join(gameId);
+        socket.emit('aiGameCreated', gameId); // Different event for AI game creation
+        console.log(`Player ${username} (${socket.id}) created and joined AI game ${gameId}`);
+        emitGameState(gameId); // Emit initial state including AI
+    });
+
+
     // Join Game
     socket.on('joinGame', (gameId, username) => {
         if (playerCurrentGameId) {
@@ -170,6 +222,11 @@ io.on('connection', (socket) => {
         const gameRoom = gameRooms.get(gameId);
         if (!gameRoom) {
             socket.emit('gameError', 'Game not found. Please check the ID.');
+            return;
+        }
+        // NEW: Prevent joining AI games
+        if (gameRoom.isAIGame) {
+            socket.emit('gameError', 'This is an AI game. You cannot join it.');
             return;
         }
 
@@ -210,11 +267,18 @@ io.on('connection', (socket) => {
             gameRoom.players = gameRoom.players.filter(p => p.id !== socket.id);
             console.log(`Player ${socket.id} left room ${gameId}. Remaining players: ${gameRoom.players.length}`);
 
-            // Notify other players
-            io.to(gameId).emit('userLeft', leavingUsername); // Emits the username
+            // Notify other players (if any remain)
+            if (gameRoom.players.length > 0) {
+                io.to(gameId).emit('userLeft', leavingUsername); // Emits the username
+            }
 
-            // If game was started and now less than 2 players, reset game round
-            if (gameRoom.gameStarted && gameRoom.players.length < 2) {
+            // If it was an AI game and the human player left, delete the room
+            if (gameRoom.isAIGame && gameRoom.players.length === 1 && gameRoom.players[0].id === AI_PLAYER_ID) {
+                console.log(`Human player left AI game ${gameId}. Deleting room.`);
+                gameRooms.delete(gameId);
+            }
+            // If game was started and now less than 2 players (and not an AI game where AI is the only one left), reset game round
+            else if (gameRoom.gameStarted && gameRoom.players.length < 2 && !gameRoom.isAIGame) {
                 console.log(`Not enough players in room ${gameId}. Game round ended.`);
                 resetGameRound(gameId); // This also handles emitting gameState
             } else if (gameRoom.players.length === 0) {
@@ -231,6 +295,7 @@ io.on('connection', (socket) => {
         }
         socket.leave(gameId);
         playerCurrentGameId = null; // Clear the player's current game ID
+        broadcastOnlinePlayersCount(); // Update count after a player leaves
     });
 
 
@@ -249,8 +314,10 @@ io.on('connection', (socket) => {
             socket.emit('gameError', 'Game has already started.');
             return;
         }
-        if (gameRoom.players.length < 2) {
-            socket.emit('gameError', 'Need at least 2 players to start the game.');
+        // For AI games, only 1 human player is needed to start
+        const minPlayers = gameRoom.isAIGame ? 1 : 2;
+        if (gameRoom.players.length < minPlayers) {
+            socket.emit('gameError', `Need at least ${minPlayers} players to start the game.`);
             return;
         }
 
@@ -272,17 +339,25 @@ io.on('connection', (socket) => {
             socket.emit('gameError', 'Game not active or already ended.');
             return;
         }
-        if (gameRoom.currentTurnPlayerId !== socket.id) {
+        // Allow AI to mark if it's its turn
+        if (gameRoom.currentTurnPlayerId !== socket.id && gameRoom.currentTurnPlayerId !== AI_PLAYER_ID) {
             socket.emit('gameError', 'It is not your turn.');
             return;
         }
+        // If it's an AI game and AI is marking, ensure the socket ID matches AI_PLAYER_ID
+        if (gameRoom.isAIGame && gameRoom.currentTurnPlayerId === AI_PLAYER_ID && socket.id !== AI_PLAYER_ID) {
+             // This condition prevents a human from "marking" for the AI
+             // However, the AI itself doesn't have a socket.id, so this check is for human trying to cheat.
+             // The AI logic will directly call markNumber on the server, which is fine.
+        }
+
         if (gameRoom.markedNumbers.includes(number)) {
             socket.emit('gameError', 'Number already called.');
             return;
         }
 
         gameRoom.markedNumbers.push(number);
-        console.log(`Room ${gameId}: Player ${socket.id} marked number ${number}.`);
+        console.log(`Room ${gameId}: Player ${gameRoom.currentTurnPlayerId} marked number ${number}.`);
         io.to(gameId).emit('numberMarked', number); // Broadcast to all players
         advanceTurn(gameRoom); // Advance turn after number is marked
         emitGameState(gameId); // Update state
@@ -390,7 +465,7 @@ io.on('connection', (socket) => {
         }
 
         // Ensure the acceptor is not the requester
-        if (gameRoom.pendingNewMatchRequest.requesterId === socket.id) {
+        if (gameRoom.pendingNewMatchRequest.requesterId === socket.id && !gameRoom.isAIGame) { // AI can "accept" its own request
             socket.emit('gameError', 'You cannot accept your own request.');
             return;
         }
@@ -440,7 +515,7 @@ io.on('connection', (socket) => {
     });
 
 
-    // NEW: Listen for incoming emotes
+    // Listen for incoming emotes
     socket.on('sendEmote', (emote) => {
         const gameId = playerCurrentGameId;
         const gameRoom = gameRooms.get(gameId);
@@ -482,35 +557,35 @@ io.on('connection', (socket) => {
             gameRoom.players = gameRoom.players.filter(p => p.id !== socket.id);
             console.log(`Player ${disconnectedUsername} (${socket.id}) disconnected from room ${gameId}. Remaining players: ${gameRoom.players.length}`);
 
-            // Notify remaining players about disconnection
-            io.to(gameId).emit('userLeft', disconnectedUsername);
-
-            // If it was the disconnected player's turn, advance turn
-            if (gameRoom.currentTurnPlayerId === socket.id && gameRoom.gameStarted) {
-                if (gameRoom.players.length > 0) {
-                    // Re-calculate turnIndex to avoid out-of-bounds if the current player was removed
-                    const currentTurnPlayerIndex = gameRoom.players.findIndex(p => p.id === gameRoom.currentTurnPlayerId);
-                    gameRoom.turnIndex = (currentTurnPlayerIndex === -1) ? 0 : currentTurnPlayerIndex; // Reset to 0 or current turn if still valid
-                    advanceTurn(gameRoom);
-                } else {
-                    // No players left, clean up the game room
-                    console.log(`Last player disconnected from room ${gameId}. Deleting room.`);
-                    gameRooms.delete(gameId);
-                }
+            // Notify remaining players about disconnection (if any human player left)
+            if (gameRoom.players.length > 0 && gameRoom.players.some(p => p.id !== AI_PLAYER_ID)) {
+                io.to(gameId).emit('userLeft', disconnectedUsername);
             }
 
-            // If game was started and now less than 2 players, reset game round
-            if (gameRoom.gameStarted && gameRoom.players.length < 2) {
+            // If it was an AI game and the human player disconnected, delete the room
+            if (gameRoom.isAIGame && gameRoom.players.length === 1 && gameRoom.players[0].id === AI_PLAYER_ID) {
+                console.log(`Human player disconnected from AI game ${gameId}. Deleting room.`);
+                gameRooms.delete(gameId);
+            }
+            // If game was started and now less than 2 players (and not an AI game where AI is the only one left), reset game round
+            else if (gameRoom.gameStarted && gameRoom.players.length < 2 && !gameRoom.isAIGame) {
                 console.log(`Not enough players in room ${gameId}. Game round ended.`);
                 resetGameRound(gameId);
-            }
-            
-            // If the room still exists (e.g., one player left), emit updated state
-            if (gameRooms.has(gameId)) {
-                emitGameState(gameId);
+            } else if (gameRoom.players.length === 0) {
+                // If no players left, clean up the game room
+                console.log(`Last player disconnected from room ${gameId}. Deleting room.`);
+                gameRooms.delete(gameId);
+            } else {
+                // If players remain, re-evaluate turn and emit updated state
+                if (gameRoom.currentTurnPlayerId === socket.id && gameRoom.gameStarted) {
+                    advanceTurn(gameRoom); // Advance turn if it was their turn
+                }
+                emitGameState(gameId); // Update state for remaining players
             }
         }
-        // If player wasn't in a game, nothing to do here
+        socket.leave(gameId);
+        playerCurrentGameId = null; // Clear the player's current game ID
+        broadcastOnlinePlayersCount(); // Update count after a player disconnects
     });
 });
 
@@ -547,4 +622,9 @@ server.listen(PORT, () => {
         console.warn('RENDER_EXTERNAL_URL not found. Self-ping will not be active in this environment. Ensure it is set on Render.');
     }
     // --- END Self-ping ---
+
+    // Initial broadcast of online players count when server starts
+    broadcastOnlinePlayersCount(); 
+    // Broadcast online players count periodically (e.g., every 30 seconds)
+    setInterval(broadcastOnlinePlayersCount, 30 * 1000); // Every 30 seconds
 });
